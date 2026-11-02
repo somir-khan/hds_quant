@@ -30,7 +30,7 @@ def _load_text(dataset_name: str, role: str) -> str:
 
     if dataset_name == "wikitext2":
         split = "train" if role == "calib" else "test"
-        ds = load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
+        ds = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split=split)
         return "\n\n".join(ds["text"])
 
     ds = load_dataset("allenai/c4", data_files={"validation": _C4_VALIDATION_FILE}, split="validation")

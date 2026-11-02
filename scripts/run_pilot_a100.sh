@@ -17,6 +17,18 @@
 
 set -euo pipefail
 
+# Submit from the project root; SLURM must find results/ before this script starts.
+cd "${SLURM_SUBMIT_DIR:-$PWD}"
+if [ ! -f "hds_quant/run_experiment.py" ]; then
+    echo "Submit this job from the project directory containing hds_quant/." >&2
+    exit 1
+fi
+
+# Inherit the cache used for pre-downloading. Export HF_HOME before sbatch
+# when using a non-default location; do not replace it with a job-local cache.
+export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
+echo "Hugging Face cache root: $HF_HOME"
+
 echo "=== Starting HDS-Quant Pilot Experiment on $(hostname) ==="
 date
 
@@ -30,9 +42,18 @@ fi
 mkdir -p results/cache
 
 # ------------------------------------------------------------------------------
-# Pre-flight: CUDA Kernel Verification & HDS Latency Budget (<5 ms)
+# Pre-flight: require CUDA, then run correctness and configured latency checks.
 # ------------------------------------------------------------------------------
 echo ">>> Running CUDA verification and latency tests..."
+python - <<'PY'
+import torch
+
+if not torch.cuda.is_available():
+    raise SystemExit("CUDA is unavailable. This GPU pilot will not fall back to CPU.")
+print("PyTorch:", torch.__version__)
+print("CUDA runtime:", torch.version.cuda)
+print("GPU:", torch.cuda.get_device_name(0))
+PY
 python -m pytest tests/test_stage1_math.py -k "cuda or encode_speed_budget" -v
 
 # ------------------------------------------------------------------------------
