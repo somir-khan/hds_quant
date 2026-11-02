@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 torch==1.10.2   
+=======
+torch>=2.2.0
+>>>>>>> cd0631a754e34ef25f956f8ca12c0b0fb984756a
 transformers>=4.45.0
 datasets
 accelerate
