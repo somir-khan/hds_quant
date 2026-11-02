@@ -4,8 +4,8 @@
 # Project: HDS-Quant End-to-End Pilot Experiment
 # ==============================================================================
 #SBATCH --job-name=hds_quant_pilot
-#SBATCH --partition=gpu
-# #SBATCH -A <your_loni_allocation>    # <-- Fill in your LONI allocation code here
+#SBATCH --partition=gpu2
+#SBATCH --account=loni_driftaudit
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
