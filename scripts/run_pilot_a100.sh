@@ -70,7 +70,8 @@ python -m hds_quant.run_experiment \
     --readout-grouping "pooled" \
     --target-transform "signed_log1p" \
     --seeds 42 100 2026 \
-    --budgets 2.50 2.75 3.00 3.25 3.50 \
+    --candidate-bits 1 2 3 4 \
+    --budgets 1.50 1.75 2.00 2.25 2.50 2.75 3.00 3.25 3.50 \
     --cache-dir "results/cache" \
     --reuse-cache \
     --output-dir "results" \
@@ -90,7 +91,8 @@ python -m hds_quant.run_experiment \
     --readout-grouping "per_bit" \
     --target-transform "signed_log1p" \
     --seeds 42 100 2026 \
-    --budgets 2.50 2.75 3.00 3.25 3.50 \
+    --candidate-bits 1 2 3 4 \
+    --budgets 1.50 1.75 2.00 2.25 2.50 2.75 3.00 3.25 3.50 \
     --run-low-shot-curve \
     --cache-dir "results/cache" \
     --reuse-cache \

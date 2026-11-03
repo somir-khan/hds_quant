@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from scipy.stats import kendalltau, spearmanr
 
 from .config import ExperimentConfig
-from .quantizer import quantize_weight_rtn
+from .quantizer import quantize_weight
 from .readout_cv import ORACLE_ESTIMATORS, SUPERVISED_ESTIMATORS, UNSUPERVISED_SCALARS
 
 FAMILIES = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
@@ -38,14 +38,18 @@ def compute_ranking_metrics(
     true_delta_loss: Dict[Tuple[str, int], float],
     raw_predictions: Dict[Tuple[str, int], float],
     meta_list: List[dict],
-    candidate_bits: Tuple[int, ...] = (2, 3),
+    candidate_bits: Optional[Tuple[int, ...]] = None,
 ) -> dict:
     """Compute ranking accuracy metrics between true_delta_loss and raw_predictions.
 
+    ``candidate_bits`` defaults to the set of bit-widths present in ``true_delta_loss`` (``(2, 3)`` if empty).
+
     Returns:
-        spearman_global, kendall_global, spearman_bit2, spearman_bit3,
-        spearman_within_family, top20_recall.
+        spearman_global, kendall_global, spearman_bit1, spearman_bit2, spearman_bit3,
+        spearman_within_family, top20_recall.  ``spearman_bitK`` is 0.0 when no b=K labels are present.
     """
+    if candidate_bits is None:
+        candidate_bits = tuple(sorted({int(k[1]) for k in true_delta_loss})) or (2, 3)
     keys = [
         (m["name"], b)
         for m in meta_list
@@ -56,6 +60,7 @@ def compute_ranking_metrics(
         return {
             "spearman_global": 0.0,
             "kendall_global": 0.0,
+            "spearman_bit1": 0.0,
             "spearman_bit2": 0.0,
             "spearman_bit3": 0.0,
             "spearman_within_family": 0.0,
@@ -69,8 +74,10 @@ def compute_ranking_metrics(
     kendall_global = _safe_kendall(y_pred, y_true)
 
     # Bit-stratified
+    b1_idx = [i for i, k in enumerate(keys) if k[1] == 1]
     b2_idx = [i for i, k in enumerate(keys) if k[1] == 2]
     b3_idx = [i for i, k in enumerate(keys) if k[1] == 3]
+    spearman_bit1 = _safe_spearman(y_pred[b1_idx], y_true[b1_idx]) if b1_idx else 0.0
     spearman_bit2 = _safe_spearman(y_pred[b2_idx], y_true[b2_idx]) if b2_idx else 0.0
     spearman_bit3 = _safe_spearman(y_pred[b3_idx], y_true[b3_idx]) if b3_idx else 0.0
 
@@ -92,6 +99,7 @@ def compute_ranking_metrics(
     return {
         "spearman_global": spearman_global,
         "kendall_global": kendall_global,
+        "spearman_bit1": spearman_bit1,
         "spearman_bit2": spearman_bit2,
         "spearman_bit3": spearman_bit3,
         "spearman_within_family": spearman_within_family,
@@ -137,20 +145,22 @@ def evaluate_perplexity(
         if bit_assignment is not None:
             for name, mod in projs:
                 b = bit_assignment[name]
-                w_q = quantize_weight_rtn(
+                w_q = quantize_weight(
                     orig_weights_cpu[name].to(device),
                     bits=b,
                     group_size=config.quant_group_size,
                     clip_ratio=config.clip_ratio,
+                    quantizer=config.quantizer,
                 )
                 mod.weight.data.copy_(w_q.to(device=mod.weight.data.device, dtype=mod.weight.data.dtype))
         elif uniform_bit is not None:
             for name, mod in projs:
-                w_q = quantize_weight_rtn(
+                w_q = quantize_weight(
                     orig_weights_cpu[name].to(device),
                     bits=uniform_bit,
                     group_size=config.quant_group_size,
                     clip_ratio=config.clip_ratio,
+                    quantizer=config.quantizer,
                 )
                 mod.weight.data.copy_(w_q.to(device=mod.weight.data.device, dtype=mod.weight.data.dtype))
 
@@ -203,12 +213,15 @@ def aggregate_seed_stability(seed_runs: List[dict], uniform_baselines: Optional[
 
     # 1. Ranking metrics aggregation
     ranking_agg = {}
-    metric_keys = ("spearman_global", "kendall_global", "spearman_bit2", "spearman_bit3", "spearman_within_family", "top20_recall")
+    metric_keys = ["spearman_global", "kendall_global", "spearman_bit2", "spearman_bit3", "spearman_within_family", "top20_recall"]
+    if any("spearman_bit1" in seed_runs[0].get("ranking_metrics", {}).get(est, {}) for est in estimators):
+        metric_keys.insert(2, "spearman_bit1")
+    metric_keys = tuple(metric_keys)
 
     for est in estimators:
         ranking_agg[est] = {}
         for mk in metric_keys:
-            vals = [run["ranking_metrics"][est][mk] for run in seed_runs if est in run.get("ranking_metrics", {})]
+            vals = [run["ranking_metrics"][est][mk] for run in seed_runs if mk in run.get("ranking_metrics", {}).get(est, {})]
             ranking_agg[est][f"{mk}_mean"] = float(np.mean(vals)) if vals else 0.0
             ranking_agg[est][f"{mk}_std"] = float(np.std(vals)) if len(vals) > 1 else 0.0
 
@@ -237,15 +250,16 @@ def aggregate_seed_stability(seed_runs: List[dict], uniform_baselines: Optional[
 
     # Uniform baselines aggregation
     uniform_agg = {}
+    uniform_keys = ("FP16", "Uniform-4bit", "Uniform-3bit", "Uniform-2bit", "Uniform-1bit")
     if uniform_baselines is not None:
-        for u_key in ("FP16", "Uniform-4bit", "Uniform-3bit", "Uniform-2bit"):
+        for u_key in uniform_keys:
             if u_key in uniform_baselines:
                 uniform_agg[u_key] = {
                     "ppl_mean": float(uniform_baselines[u_key]["ppl"]),
                     "ppl_std": 0.0,
                 }
     else:
-        for u_key in ("FP16", "Uniform-4bit", "Uniform-3bit", "Uniform-2bit"):
+        for u_key in uniform_keys:
             u_vals = [run["uniform_baselines"][u_key]["ppl"] for run in seed_runs if "uniform_baselines" in run and u_key in run["uniform_baselines"]]
             if u_vals:
                 uniform_agg[u_key] = {

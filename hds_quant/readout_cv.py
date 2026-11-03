@@ -6,7 +6,7 @@ layer in the same fold (``fold_id = layer_idx % n_folds``). The ridge penalty of
 fitted strictly inside each inner split.
 
 Input structures (as produced by ``label_collector``):
-    features_by_proj_bit : {(proj_name, b): {estimator_name: float | torch.Tensor}}   (b in (2, 3))
+    features_by_proj_bit : {(proj_name, b): {estimator_name: float | torch.Tensor}}   (b in config.marginal_bits)
     delta_loss_by_proj_bit: {(proj_name, b): float}
     meta_list            : [{"name", "layer_idx", "family_idx", "num_params", ...}]
 """
@@ -138,29 +138,37 @@ def _get_column_weights(
     estimator: Optional[str] = None,
     col_weights: Optional[np.ndarray] = None,
     hd_dim: Optional[int] = None,
+    n_indicator_cols: int = 1,
 ) -> Optional[np.ndarray]:
     """Calculate column upweighting factor sqrt(D / d_meta) for metadata/scalar columns.
 
     This ensures the wide block (hypervector / explicit histogram) and the scalar metadata block receive equal
     L2 penalty capacity.
+
+    ``_META_COLS`` counts the metadata columns assuming ONE bit-indicator column; when the design matrix carries
+    ``n_indicator_cols`` indicator columns (e.g. 2 for ``marginal_bits == (1, 2, 3)``) the metadata block grows
+    accordingly: ``d_meta = (_META_COLS[estimator] - 1) + n_indicator_cols``.
     """
     if col_weights is not None:
         return np.asarray(col_weights, dtype=np.float64)
+    n_ind = int(n_indicator_cols)
+    shift = n_ind - 1  # extra indicator columns relative to the single-indicator (2, 3) default
     d_meta = None
     if estimator is not None:
-        d_meta = _META_COLS.get(estimator)
+        if estimator in _META_COLS:
+            d_meta = (_META_COLS[estimator] - 1) + n_ind
     else:
         if hd_dim is not None:
-            if n_cols == hd_dim + 2:
-                d_meta = 2
-            elif n_cols == hd_dim + 10:
-                d_meta = 10
-        elif n_cols == 4098:
-            d_meta = 2
-        elif n_cols == 4106:
-            d_meta = 10
-        elif n_cols == 16394:
-            d_meta = 10
+            if n_cols == hd_dim + 2 + shift:
+                d_meta = 2 + shift
+            elif n_cols == hd_dim + 10 + shift:
+                d_meta = 10 + shift
+        elif n_cols - shift == 4098:
+            d_meta = 2 + shift
+        elif n_cols - shift == 4106:
+            d_meta = 10 + shift
+        elif n_cols - shift == 16394:
+            d_meta = 10 + shift
 
     if d_meta is None:
         return None
@@ -200,6 +208,7 @@ def _fit_ridge(
     transform_mode: str = "raw",
     alphas: Optional[np.ndarray] = None,
     inner_cv_folds: Optional[int] = None,
+    n_indicator_cols: int = 1,
 ) -> Tuple[StandardScaler, Union[Ridge, RidgeCV], Callable[[np.ndarray], np.ndarray]]:
     """Standardize, upweight scalar/metadata columns, and fit Ridge/RidgeCV.
 
@@ -207,7 +216,13 @@ def _fit_ridge(
     with target transform and StandardScaler fitted strictly on each inner training split.
     Returns ``(scaler, ridge, inverse_full)``.
     """
-    weights = _get_column_weights(X.shape[1], estimator=estimator, col_weights=col_weights, hd_dim=hd_dim)
+    weights = _get_column_weights(
+        X.shape[1],
+        estimator=estimator,
+        col_weights=col_weights,
+        hd_dim=hd_dim,
+        n_indicator_cols=n_indicator_cols,
+    )
     groups = None if groups is None else np.asarray(groups)
     n_unique = 0 if groups is None else len(np.unique(groups))
     alphas_arr = RIDGE_ALPHAS if alphas is None else np.asarray(alphas, dtype=np.float64)
@@ -303,6 +318,7 @@ def _fit_predict_grouped(
     transform_mode: str = "raw",
     alphas: Optional[np.ndarray] = None,
     inner_cv_folds: Optional[int] = None,
+    n_indicator_cols: int = 1,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Fit one scaler+Ridge per group key and predict the test rows (inverted to original delta_loss scale).
 
@@ -317,7 +333,13 @@ def _fit_predict_grouped(
     vec_parts = []
     fallback = None
     preds = np.zeros(len(keys_te))
-    weights = _get_column_weights(X_tr.shape[1], estimator=estimator, col_weights=col_weights, hd_dim=hd_dim)
+    weights = _get_column_weights(
+        X_tr.shape[1],
+        estimator=estimator,
+        col_weights=col_weights,
+        hd_dim=hd_dim,
+        n_indicator_cols=n_indicator_cols,
+    )
 
     for key in sorted(set(keys_te), key=repr):
         te_idx = [i for i, k in enumerate(keys_te) if k == key]
@@ -335,6 +357,7 @@ def _fit_predict_grouped(
                     transform_mode=transform_mode,
                     alphas=alphas,
                     inner_cv_folds=inner_cv_folds,
+                    n_indicator_cols=n_indicator_cols,
                 )
                 vec_parts.append(_model_vector(models[key][0], models[key][1]))
             scaler, ridge, inverse = models[key]
@@ -350,6 +373,7 @@ def _fit_predict_grouped(
                     transform_mode=transform_mode,
                     alphas=alphas,
                     inner_cv_folds=inner_cv_folds,
+                    n_indicator_cols=n_indicator_cols,
                 )
                 vec_parts.append(_model_vector(fallback[0], fallback[1]))
             scaler, ridge, inverse = fallback
@@ -372,13 +396,36 @@ def _alloc_cost(raw2: float, raw3: float) -> Tuple[float, float]:
     return s2, s3
 
 
+def _alloc_cost_multi(raw_by_bit: Dict[int, float], marginal_bits: Tuple[int, ...]) -> Dict[int, float]:
+    """Non-negative, bit-monotone costs for an arbitrary set of marginal bit-widths.
+
+    The highest marginal bit gets ``max(raw, 0)``; every lower bit is forced to be at least
+    ``MONO_EPS`` above the next-higher bit's cost, so cost strictly increases as bits decrease.
+    For ``marginal_bits == (2, 3)`` this reproduces ``_alloc_cost``.
+    """
+    out: Dict[int, float] = {}
+    prev = 0.0
+    for idx, b in enumerate(sorted(marginal_bits, reverse=True)):
+        val = float(np.nan_to_num(raw_by_bit[b], nan=0.0, posinf=1e30, neginf=0.0))
+        cur = max(val, 0.0) if idx == 0 else max(max(val, 0.0), prev + MONO_EPS)
+        out[int(b)] = cur
+        prev = cur
+    return out
+
+
 def _base_feature(feats: dict, est: str) -> np.ndarray:
     if est == "Scalar-MSE-Ridge":
         return np.array([math.log(float(feats["Scalar-MSE"]) + 1e-8)], dtype=np.float64)
     return np.asarray(feats[est], dtype=np.float64).reshape(-1)
 
 
-def _build_alloc_costs(raw: Dict[str, Dict[Tuple[str, int], float]], projs: List[dict], estimators) -> dict:
+def _build_alloc_costs(
+    raw: Dict[str, Dict[Tuple[str, int], float]],
+    projs: List[dict],
+    estimators,
+    marginal_bits: Tuple[int, ...] = MARGINAL_BITS,
+    reference_bit: int = REFERENCE_BIT,
+) -> dict:
     """ILP input costs. ``Oracle-Loss-Raw`` is the unmodified measured delta_loss (no clipping, no monotone fix)."""
     alloc: Dict[str, Dict[Tuple[str, int], float]] = {}
     for e in estimators:
@@ -386,12 +433,13 @@ def _build_alloc_costs(raw: Dict[str, Dict[Tuple[str, int], float]], projs: List
         for m in projs:
             name = m["name"]
             if e == "Oracle-Loss-Raw":
-                s2, s3 = float(raw[e][(name, 2)]), float(raw[e][(name, 3)])
+                for b in marginal_bits:
+                    costs[(name, int(b))] = float(raw[e][(name, int(b))])
             else:
-                s2, s3 = _alloc_cost(raw[e][(name, 2)], raw[e][(name, 3)])
-            costs[(name, 2)] = s2
-            costs[(name, 3)] = s3
-            costs[(name, REFERENCE_BIT)] = 0.0
+                mono = _alloc_cost_multi({b: raw[e][(name, int(b))] for b in marginal_bits}, marginal_bits)
+                for b in marginal_bits:
+                    costs[(name, int(b))] = mono[int(b)]
+            costs[(name, int(reference_bit))] = 0.0
         alloc[e] = costs
     return alloc
 
@@ -408,25 +456,33 @@ def _prepare_design(
     _group_key(grouping, 0, 2)  # validate modes early
     _make_target_transform(transform, np.array([1.0, 2.0]))
 
+    marginal_bits = tuple(sorted(int(b) for b in config.marginal_bits))
+    if len(marginal_bits) == 0:
+        raise ValueError("config.marginal_bits is empty; need at least one non-reference bit-width")
+    bits_txt = ", ".join(str(b) for b in marginal_bits)
+
     projs = sorted(meta_list, key=lambda m: (m["layer_idx"], m["family_idx"]))
     if require_all_labels:
         projs = [
             m
             for m in projs
-            if all((m["name"], b) in features_by_proj_bit and (m["name"], b) in delta_loss_by_proj_bit for b in MARGINAL_BITS)
+            if all(
+                (m["name"], b) in features_by_proj_bit and (m["name"], b) in delta_loss_by_proj_bit
+                for b in marginal_bits
+            )
         ]
         if not projs:
-            raise ValueError("no projection has both features and labels for b in (2, 3)")
+            raise ValueError(f"no projection has both features and labels for b in ({bits_txt})")
     else:
         projs = [
             m
             for m in projs
-            if all((m["name"], b) in features_by_proj_bit for b in MARGINAL_BITS)
+            if all((m["name"], b) in features_by_proj_bit for b in marginal_bits)
         ]
         if not projs:
-            raise ValueError("no projection has features for b in (2, 3)")
+            raise ValueError(f"no projection has features for b in ({bits_txt})")
 
-    samples = [(m, b) for m in projs for b in MARGINAL_BITS]
+    samples = [(m, b) for m in projs for b in marginal_bits]
     names = [(m["name"], b) for m, b in samples]
     layer = np.array([m["layer_idx"] for m, _ in samples])
     bits = np.array([b for _, b in samples])
@@ -438,7 +494,12 @@ def _prepare_design(
         for k in names
     ], dtype=np.float64)
     keys = [_group_key(grouping, int(f), int(b)) for f, b in zip(fam, bits)]
-    indicator = (bits == 2).astype(np.float64)[:, None]
+    # One binary indicator column per marginal bit except the highest (the implicit baseline):
+    # (2, 3) -> [bits == 2]; (1, 2, 3) -> [bits == 1, bits == 2].
+    if len(marginal_bits) > 1:
+        indicator = np.column_stack([(bits == b).astype(np.float64) for b in marginal_bits[:-1]])
+    else:
+        indicator = np.zeros((len(bits), 1), dtype=np.float64)  # single marginal bit: constant column keeps d_meta fixed
     X_all = {
         e: np.hstack([np.stack([_base_feature(features_by_proj_bit[k], e) for k in names]), indicator])
         for e in SUPERVISED_ESTIMATORS
@@ -453,6 +514,8 @@ def _prepare_design(
         "X_all": X_all,
         "grouping": grouping,
         "transform": transform,
+        "marginal_bits": marginal_bits,
+        "n_indicator_cols": int(indicator.shape[1]),
     }
 
 
@@ -465,10 +528,11 @@ def cross_validate_estimators(
     num_train_layers: Optional[int] = None,
     seed: int = 42,
 ) -> dict:
-    """Predict a sensitivity for every ``(projection, b in {2, 3})`` with layer-disjoint folds."""
+    """Predict a sensitivity for every ``(projection, b in config.marginal_bits)`` with layer-disjoint folds."""
     d = _prepare_design(features_by_proj_bit, delta_loss_by_proj_bit, meta_list, config, require_all_labels=True)
     projs, names, layer, y, keys, X_all = d["projs"], d["names"], d["layer"], d["y"], d["keys"], d["X_all"]
     grouping, transform = d["grouping"], d["transform"]
+    n_indicator_cols = d["n_indicator_cols"]
 
     num_layers = max(m["layer_idx"] for m in projs) + 1
     n_folds = min(int(config.cv_folds), num_layers)
@@ -520,6 +584,7 @@ def cross_validate_estimators(
                 transform_mode=transform,
                 alphas=np.asarray(config.ridge_alphas, dtype=np.float64),
                 inner_cv_folds=int(config.cv_folds),
+                n_indicator_cols=n_indicator_cols,
             )
             readout_time[e] += time.perf_counter() - t0
             pred = np.nan_to_num(pred, nan=0.0, posinf=1e30, neginf=-1e30)
@@ -527,7 +592,13 @@ def cross_validate_estimators(
                 raw[e][names[i]] = float(p)
             model_coefs[(e, int(k_fold))] = vec
 
-    alloc = _build_alloc_costs(raw, projs, ALL_ESTIMATORS)
+    alloc = _build_alloc_costs(
+        raw,
+        projs,
+        ALL_ESTIMATORS,
+        marginal_bits=d["marginal_bits"],
+        reference_bit=config.reference_bit,
+    )
 
     return {
         "raw_predictions": raw,
@@ -619,6 +690,7 @@ def evaluate_fixed_k_layer_acquisition(
             transform_mode=transform,
             alphas=np.asarray(config.ridge_alphas, dtype=np.float64),
             inner_cv_folds=int(config.cv_folds),
+            n_indicator_cols=d["n_indicator_cols"],
         )
         readout_time[e] += time.perf_counter() - t0
         pred = np.nan_to_num(pred, nan=0.0, posinf=1e30, neginf=-1e30)
@@ -635,7 +707,13 @@ def evaluate_fixed_k_layer_acquisition(
         "acquisition_fraction": len(acquired) / len(all_layer_ids),
         "heldout_predictions": heldout,
         "raw_predictions": full,
-        "alloc_costs": _build_alloc_costs(full, projs, SUPERVISED_ESTIMATORS),
+        "alloc_costs": _build_alloc_costs(
+            full,
+            projs,
+            SUPERVISED_ESTIMATORS,
+            marginal_bits=d["marginal_bits"],
+            reference_bit=config.reference_bit,
+        ),
         "estimator_readout_time_sec": readout_time,
         "estimators": SUPERVISED_ESTIMATORS,
         "readout_grouping": d["grouping"],

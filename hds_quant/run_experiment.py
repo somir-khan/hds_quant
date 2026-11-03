@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import json
 import math
@@ -94,12 +95,33 @@ def _compute_label_cache_fingerprint(model: nn.Module, calib_ids: torch.Tensor, 
         h.update(repr(value).encode("utf-8"))
         h.update(b"|")
 
+    param = next(iter(model.parameters()), None)
+    model_device = param.device if param is not None else calib_ids.device
+    model_dtype = param.dtype if param is not None else torch.float32
+
     upd("cache_schema_version", "v5_complete_chunked_byte_hash")
     upd("model_name", exp_config.model_name)
     upd("quant_group_size", int(exp_config.quant_group_size))
     upd("reference_bit", int(exp_config.reference_bit))
     upd("candidate_bits", tuple(int(b) for b in exp_config.candidate_bits))
     upd("clip_ratio", float(exp_config.clip_ratio))
+    if getattr(exp_config, "quantizer", "rtn") != "rtn":
+        upd("quantizer", exp_config.quantizer)
+        if exp_config.quantizer == "hqq":
+            from .quantizer import get_effective_hqq_config
+            eff_cfg = get_effective_hqq_config(
+                group_size=exp_config.quant_group_size,
+                device=model_device,
+                dtype=model_dtype,
+            )
+            upd("hqq_fingerprint_schema", "v2_precision_aware")
+            upd("hqq_backend", eff_cfg["backend"])
+            upd("hqq_version", eff_cfg["version"])
+            upd("hqq_device_type", eff_cfg["device_type"])
+            upd("hqq_optimizer_dtype", eff_cfg["optimizer_dtype"])
+            upd("hqq_dequantize_compute_dtype", eff_cfg["dequantize_compute_dtype"])
+            for k in sorted(eff_cfg.keys()):
+                upd(f"hqq_effective_{k}", eff_cfg[k])
     upd("calib_shape", tuple(int(s) for s in calib_ids.shape))
     upd("calib_dtype", str(calib_ids.dtype))
     upd("calib_sha256", hashlib.sha256(calib_ids.detach().cpu().contiguous().numpy().tobytes()).hexdigest())
@@ -134,6 +156,96 @@ def _load_cached_labels(cache_file: Path, fp_hash: str) -> Optional[dict]:
     return cached
 
 
+# Candidate set of label caches written before 1-bit support; they can be upgraded in place by probing only
+# the newly requested bit-widths (see ``_load_or_upgrade_cached_labels``).
+_LEGACY_CANDIDATE_BITS = (2, 3, 4)
+
+
+def _load_or_upgrade_cached_labels(
+    cache_file: Path,
+    fp_hash: str,
+    model: nn.Module,
+    calib_ids: torch.Tensor,
+    exp_config: ExperimentConfig,
+    batch_size: int,
+    save_path: Path,
+) -> "tuple[Optional[dict], float]":
+    """Load a label cache, incrementally upgrading a ``(2, 3, 4)`` cache to the requested ``candidate_bits``.
+
+    Returns ``(cached_or_None, wall_label_time_sec)`` where ``wall_label_time_sec`` is the time actually spent in
+    this call probing missing bit-widths (0.0 for a plain cache hit).
+
+    Upgrade rule: if the cache fingerprint does not match the requested config but DOES match the same
+    model / calibration tokens / quantizer settings with ``candidate_bits=(2, 3, 4)``, and the request needs
+    bit-widths absent from the cached ``delta_loss`` (e.g. ``{1}``), only those bit-widths are probed. The
+    cached ``(2, 3)`` labels are reused, probe/label times are summed, and the merged cache is saved under the
+    new fingerprint to ``save_path``.
+    """
+    cached = torch.load(cache_file, weights_only=False)
+    if cached.get("fingerprint") == fp_hash:
+        return cached, 0.0
+
+    ref = int(exp_config.reference_bit)
+    if tuple(exp_config.candidate_bits) != _LEGACY_CANDIDATE_BITS and ref in _LEGACY_CANDIDATE_BITS:
+        exp_config_234 = dataclasses.replace(exp_config, candidate_bits=_LEGACY_CANDIDATE_BITS)
+        fp_hash_234 = _compute_label_cache_fingerprint(model, calib_ids, exp_config_234)
+        if cached.get("fingerprint") == fp_hash_234:
+            cached_bits = {int(k[1]) for k in cached["delta_loss"]}
+            missing_bits = set(int(b) for b in exp_config.marginal_bits) - cached_bits
+            if missing_bits:
+                print(
+                    f"Upgrading cached labels {cache_file}: reusing bits {sorted(cached_bits)}, "
+                    f"probing only missing bits {sorted(missing_bits)}..."
+                )
+                exp_config_missing = dataclasses.replace(
+                    exp_config, candidate_bits=tuple(sorted(missing_bits | {ref}))
+                )
+                out = collect_marginal_loss_labels(model, calib_ids, exp_config_missing, batch_size=batch_size)
+                # Re-reference the new labels to the CACHED 4-bit baseline so all bit-widths share one baseline.
+                base_shift = float(out["base_loss_4bit"]) - float(cached["base_loss_4bit"])
+                delta_loss = dict(cached["delta_loss"])
+                for k, v in out["delta_loss"].items():
+                    delta_loss[k] = float(v) + base_shift
+
+                def _prev(key: str) -> float:
+                    return float(cached.get(key, 0.0))
+
+                base_overhead = _prev("base_overhead_time_sec")
+                restore_time = _prev("restore_time_sec")
+                probe_time = float(cached.get("probe_time_sec", _prev("label_time_sec"))) + float(
+                    out.get("probe_time_sec", out["label_time_sec"])
+                )
+                label_time = base_overhead + probe_time + restore_time
+                merged = {
+                    "delta_loss": delta_loss,
+                    "base_loss_4bit": float(cached["base_loss_4bit"]),
+                    "label_time_sec": label_time,
+                    "base_overhead_time_sec": base_overhead,
+                    "probe_time_sec": probe_time,
+                    "restore_time_sec": restore_time,
+                    "fingerprint": fp_hash,
+                    "quantizer": exp_config.quantizer,
+                }
+                if exp_config.quantizer == "hqq":
+                    from .quantizer import get_effective_hqq_config
+                    param = next(iter(model.parameters()), None)
+                    dev = param.device if param is not None else calib_ids.device
+                    dt = param.dtype if param is not None else torch.float32
+                    eff_cfg = get_effective_hqq_config(
+                        group_size=exp_config.quant_group_size,
+                        device=dev,
+                        dtype=dt,
+                    )
+                    merged["hqq_backend"] = eff_cfg["backend"]
+                    merged["hqq_version"] = eff_cfg["version"]
+                    merged["hqq_config"] = eff_cfg
+                torch.save(merged, save_path)
+                print(f"Upgraded label cache saved to {save_path} (+{float(out['label_time_sec']):.2f}s).")
+                return merged, float(out["label_time_sec"])
+
+    return _load_cached_labels(cache_file, fp_hash), 0.0
+
+
 def _pair_dict_to_json(d: Dict) -> Dict[str, float]:
     """``{(proj_name, b): v}`` -> ``{"proj_name|b": v}`` (JSON object keys must be strings)."""
     return {f"{name}|{b}": float(v) for (name, b), v in d.items()}
@@ -158,12 +270,28 @@ def parse_args():
     parser = argparse.ArgumentParser(description="HDS-Quant end-to-end experiment runner.")
     parser.add_argument("--model-id", type=str, default="meta-llama/Llama-3.2-1B")
     parser.add_argument("--eval-dataset", type=str, default="wikitext2", choices=["wikitext2", "c4"])
+    parser.add_argument("--quantizer", type=str, default="rtn", choices=["rtn", "hqq"])
     parser.add_argument("--residual-anchor", type=str, default="fp16_strict", choices=["fp16_strict", "int4_aligned"])
     parser.add_argument("--coord-binding", type=str, default="raw_index_strict", choices=["raw_index_strict", "salience_bucket"])
     parser.add_argument("--readout-grouping", type=str, default="per_bit_family", choices=["pooled", "per_bit", "per_family", "per_bit_family"])
     parser.add_argument("--target-transform", type=str, default="signed_log1p", choices=["raw", "signed_log1p", "rank"])
     parser.add_argument("--seeds", nargs="+", type=int, default=[42, 100, 2026])
     parser.add_argument("--budgets", nargs="+", type=float, default=[2.50, 2.75, 3.00, 3.25, 3.50])
+    parser.add_argument(
+        "--candidate-bits",
+        nargs="+",
+        type=int,
+        default=[2, 3, 4],
+        help="Candidate weight bit-widths (must include the reference bit 4), e.g. `1 2 3 4` to enable 1-bit.",
+    )
+    parser.add_argument(
+        "--low-shot-budgets",
+        nargs="+",
+        type=float,
+        default=None,
+        help="Budgets for the low-shot curve. Default: the --budgets entries in {1.5, 2.0, 3.0}, "
+        "else the middle budget.",
+    )
     parser.add_argument("--n-calib-seqs", type=int, default=64)
     parser.add_argument("--calib-seq-len", type=int, default=1024)
     parser.add_argument("--max-encoded-tokens", type=int, default=4096)
@@ -184,11 +312,16 @@ def run_experiment(args):
     os.makedirs(args.cache_dir, exist_ok=True)
     os.makedirs(args.output_dir, exist_ok=True)
 
-    candidate_bits = (2, 3, 4)
+    candidate_bits = tuple(sorted(set(int(b) for b in (getattr(args, "candidate_bits", None) or [2, 3, 4]))))
+    if 4 not in candidate_bits or len(candidate_bits) < 2:
+        raise ValueError(f"candidate_bits={candidate_bits} must contain the reference bit 4 and at least one lower bit")
     min_b, max_b = min(candidate_bits), max(candidate_bits)
     for b in args.budgets:
         if not (min_b <= float(b) <= max_b):
             raise ValueError(f"Budget {b} is outside feasible candidate_bits range [{min_b}, {max_b}]")
+    for b in getattr(args, "low_shot_budgets", None) or []:
+        if not (min_b <= float(b) <= max_b):
+            raise ValueError(f"Low-shot budget {b} is outside feasible candidate_bits range [{min_b}, {max_b}]")
 
     if args.smoke_test:
         print("[Smoke Test Mode] Initializing synthetic 4-layer model and token streams on CPU...")
@@ -198,7 +331,8 @@ def run_experiment(args):
         quant_group_size = 64
         hd_dim = 512
         seeds = [s for s in args.seeds if s in (42, 100)] or [42, 100]
-        budgets = [b for b in args.budgets if b in (2.50, 3.00, 3.50)] or [2.50, 3.00, 3.50]
+        smoke_budgets = (2.50, 3.00, 3.50) + ((1.50, 2.00) if 1 in candidate_bits else ())
+        budgets = [b for b in args.budgets if b in smoke_budgets] or [2.50, 3.00, 3.50]
         max_encoded_tokens = 256
     else:
         print(f"Loading model {args.model_id} on {device}...")
@@ -215,6 +349,15 @@ def run_experiment(args):
         print(f"Preparing {args.eval_dataset} eval token stream...")
         eval_ids = get_eval_tokens(tokenizer, dataset_name=args.eval_dataset, seq_len=args.eval_seq_len)
 
+    # Budgets at which the low-shot (fixed-K layer acquisition) curve is evaluated.
+    if getattr(args, "low_shot_budgets", None):
+        low_shot_budgets = sorted(set(float(b) for b in args.low_shot_budgets))
+    else:
+        low_shot_budgets = [b for b in budgets if any(math.isclose(float(b), t) for t in (1.50, 2.00, 3.00))]
+        if not low_shot_budgets:
+            low_shot_budgets = [sorted(budgets)[len(budgets) // 2]]
+        low_shot_budgets = sorted(float(b) for b in low_shot_budgets)
+
     meta_list = discover_target_projections(model)
     orig_weights_cpu = {m["name"]: m["module"].weight.data.detach().cpu().clone() for m in meta_list}
 
@@ -223,8 +366,10 @@ def run_experiment(args):
     base_eval_config = ExperimentConfig(
         model_name=args.model_id,
         num_layers=num_layers,
+        quantizer=getattr(args, "quantizer", "rtn"),
         quant_group_size=quant_group_size,
         hd_dim=hd_dim,
+        candidate_bits=candidate_bits,
         device=device,
     )
     uniform_baselines = {
@@ -233,6 +378,10 @@ def run_experiment(args):
         "Uniform-3bit": evaluate_perplexity(model, eval_ids, meta_list, base_eval_config, uniform_bit=3, orig_weights_cpu=orig_weights_cpu, batch_size=args.batch_size),
         "Uniform-2bit": evaluate_perplexity(model, eval_ids, meta_list, base_eval_config, uniform_bit=2, orig_weights_cpu=orig_weights_cpu, batch_size=args.batch_size),
     }
+    if 1 in candidate_bits:
+        uniform_baselines["Uniform-1bit"] = evaluate_perplexity(
+            model, eval_ids, meta_list, base_eval_config, uniform_bit=1, orig_weights_cpu=orig_weights_cpu, batch_size=args.batch_size
+        )
 
     seed_runs = []
     low_shot_curve_data = {}
@@ -264,7 +413,9 @@ def run_experiment(args):
         exp_config = ExperimentConfig(
             model_name=args.model_id,
             num_layers=num_layers,
+            quantizer=getattr(args, "quantizer", "rtn"),
             quant_group_size=quant_group_size,
+            candidate_bits=candidate_bits,
             hd_dim=hd_dim,
             max_encoded_tokens=max_encoded_tokens,
             device=device,
@@ -293,17 +444,27 @@ def run_experiment(args):
         # 1. Marginal loss labels (cached with a fingerprint of everything they depend on)
         fp_hash = _compute_label_cache_fingerprint(model, calib_ids, exp_config)
         cache_key = f"{args.model_id.replace('/', '_')}_seed{seed}" if not args.smoke_test else f"smoke_seed{seed}"
-        primary_cache_file = Path(args.cache_dir) / f"{cache_key}_labels.pt"
+        q_suffix = f"_{exp_config.quantizer}" if exp_config.quantizer != "rtn" else ""
+        primary_cache_file = Path(args.cache_dir) / f"{cache_key}{q_suffix}_labels.pt"
         cache_file = primary_cache_file
         if not cache_file.exists():
-            alt_cache = Path(args.cache_dir) / f"labels_seed{seed}.pt"
+            alt_cache = Path(args.cache_dir) / f"labels_seed{seed}{q_suffix}.pt"
             if alt_cache.exists():
                 cache_file = alt_cache
 
         cached = None
+        upgraded_wall_label_time_sec = 0.0
         if args.reuse_cache and cache_file.exists():
             print(f"Loading cached marginal loss labels from {cache_file}...")
-            cached = _load_cached_labels(cache_file, fp_hash)
+            cached, upgraded_wall_label_time_sec = _load_or_upgrade_cached_labels(
+                cache_file,
+                fp_hash,
+                model,
+                calib_ids,
+                exp_config,
+                batch_size=args.batch_size,
+                save_path=primary_cache_file,
+            )
 
         if cached is not None:
             delta_loss = cached["delta_loss"]
@@ -314,7 +475,7 @@ def run_experiment(args):
             restore_time_sec = float(
                 cached.get("restore_time_sec", max(0.0, label_time_sec - base_overhead_time_sec - probe_time_sec))
             )
-            wall_label_time_sec = 0.0
+            wall_label_time_sec = float(upgraded_wall_label_time_sec)  # >0 only when bits were added incrementally
         else:
             print(f"Collecting marginal loss labels for seed {seed}...")
             label_out = collect_marginal_loss_labels(model, calib_ids, exp_config, batch_size=args.batch_size)
@@ -325,18 +486,30 @@ def run_experiment(args):
             probe_time_sec = float(label_out.get("probe_time_sec", label_time_sec))
             restore_time_sec = float(label_out.get("restore_time_sec", 0.0))
             wall_label_time_sec = label_time_sec
-            torch.save(
-                {
-                    "delta_loss": delta_loss,
-                    "base_loss_4bit": base_loss_4bit,
-                    "label_time_sec": label_time_sec,
-                    "base_overhead_time_sec": base_overhead_time_sec,
-                    "probe_time_sec": probe_time_sec,
-                    "restore_time_sec": restore_time_sec,
-                    "fingerprint": fp_hash,
-                },
-                primary_cache_file,
-            )
+            cache_payload = {
+                "delta_loss": delta_loss,
+                "base_loss_4bit": base_loss_4bit,
+                "label_time_sec": label_time_sec,
+                "base_overhead_time_sec": base_overhead_time_sec,
+                "probe_time_sec": probe_time_sec,
+                "restore_time_sec": restore_time_sec,
+                "fingerprint": fp_hash,
+                "quantizer": exp_config.quantizer,
+            }
+            if exp_config.quantizer == "hqq":
+                from .quantizer import get_effective_hqq_config
+                param = next(iter(model.parameters()), None)
+                dev = param.device if param is not None else calib_ids.device
+                dt = param.dtype if param is not None else torch.float32
+                eff_cfg = get_effective_hqq_config(
+                    group_size=exp_config.quant_group_size,
+                    device=dev,
+                    dtype=dt,
+                )
+                cache_payload["hqq_backend"] = eff_cfg["backend"]
+                cache_payload["hqq_version"] = eff_cfg["version"]
+                cache_payload["hqq_config"] = eff_cfg
+            torch.save(cache_payload, primary_cache_file)
             print(f"Cached labels saved to {primary_cache_file} ({label_time_sec:.2f}s).")
 
         # 2. Single-pass features
@@ -378,7 +551,9 @@ def run_experiment(args):
             for b in budgets:
                 b_key = f"{b:.2f}"
                 t_ilp = time.perf_counter()
-                ilp_res = solve_bit_allocation_ilp(alloc_costs[est], meta_list, target_avg_bits=b)
+                ilp_res = solve_bit_allocation_ilp(
+                    alloc_costs[est], meta_list, target_avg_bits=b, candidate_bits=candidate_bits
+                )
                 estimator_ilp_time_sec[est] += time.perf_counter() - t_ilp
                 if ilp_res["success"] and ilp_res.get("bit_assignment"):
                     ppl_res = _eval_or_lookup_ppl(ilp_res["bit_assignment"], exp_config)  # NOT calibration cost
@@ -447,9 +622,31 @@ def run_experiment(args):
                     heldout_pred = acq["heldout_predictions"][est]
                     heldout_true = {key: delta_loss[key] for key in heldout_pred}
                     r_metrics = compute_ranking_metrics(heldout_true, heldout_pred, meta_list)
-                    t_ilp = time.perf_counter()
-                    ilp_k = solve_bit_allocation_ilp(acq["alloc_costs"][est], meta_list, target_avg_bits=3.00)
-                    ilp_k_time_sec = float(time.perf_counter() - t_ilp)
+
+                    # One ILP solve + (cached) held-out PPL per low-shot budget.
+                    by_budget: dict = {}
+                    ilp_k_times = []
+                    for lb in low_shot_budgets:
+                        t_ilp = time.perf_counter()
+                        ilp_k = solve_bit_allocation_ilp(
+                            acq["alloc_costs"][est], meta_list, target_avg_bits=lb, candidate_bits=candidate_bits
+                        )
+                        ilp_k_times.append(float(time.perf_counter() - t_ilp))
+                        if ilp_k["success"] and ilp_k.get("bit_assignment"):
+                            ppl_b = _eval_or_lookup_ppl(ilp_k["bit_assignment"], exp_config)
+                        else:
+                            ppl_b = {"nll": float("nan"), "ppl": float("nan"), "eval_time_sec": 0.0, "seq_nlls": [], "seq_token_counts": []}
+                        by_budget[f"{lb:.2f}"] = {
+                            "success": bool(ilp_k.get("success", False)),
+                            "bit_assignment": ilp_k.get("bit_assignment", {}),
+                            "achieved_avg_bits": float(ilp_k.get("achieved_avg_bits", float("nan"))),
+                            "ppl": ppl_b["ppl"],
+                            "nll": ppl_b["nll"],
+                            "seq_nlls": ppl_b.get("seq_nlls", []),
+                            "seq_token_counts": ppl_b.get("seq_token_counts", []),
+                        }
+                    # The acquisition cost covers allocating for ONE target budget (mean ILP time over budgets).
+                    ilp_k_time_sec = float(np.mean(ilp_k_times))
                     acquisition_cost_sec = float(
                         forward_capture_time_sec
                         + estimator_feature_time_sec.get(est, 0.0)
@@ -459,26 +656,27 @@ def run_experiment(args):
                         + acq["estimator_readout_time_sec"].get(est, 0.0)
                         + ilp_k_time_sec
                     )
-                    if ilp_k["success"] and ilp_k.get("bit_assignment"):
-                        ppl_k = _eval_or_lookup_ppl(ilp_k["bit_assignment"], exp_config)
-                    else:
-                        ppl_k = {"nll": float("nan"), "ppl": float("nan"), "eval_time_sec": 0.0, "seq_nlls": [], "seq_token_counts": []}
+                    # Legacy top-level fields: the 3.00b budget when evaluated, else the first low-shot budget.
+                    legacy_key = next((bk for bk in by_budget if math.isclose(float(bk), 3.0)), None)
+                    primary = by_budget[legacy_key if legacy_key is not None else next(iter(by_budget))]
                     low_shot_curve_data[k_key][est].append({
                         "seed": seed,
-                        "success": bool(ilp_k.get("success", False)),
+                        "success": primary["success"],
                         "acquired_layers": acq["acquired_layers"],
                         "unlabeled_layers": acq["unlabeled_layers"],
                         "n_labeled_layers": acq["n_labeled_layers"],
-                        "bit_assignment": ilp_k.get("bit_assignment", {}),
-                        "achieved_avg_bits": float(ilp_k.get("achieved_avg_bits", float("nan"))),
+                        "bit_assignment": primary["bit_assignment"],
+                        "achieved_avg_bits": primary["achieved_avg_bits"],
                         "heldout_predictions": _pair_dict_to_json(heldout_pred),
                         "raw_predictions": _pair_dict_to_json(acq["raw_predictions"][est]),
                         "spearman_global": r_metrics["spearman_global"],
                         "top20_recall": r_metrics["top20_recall"],
-                        "ppl_3bit": ppl_k["ppl"],
-                        "nll_3bit": ppl_k["nll"],
-                        "seq_nlls": ppl_k.get("seq_nlls", []),
-                        "seq_token_counts": ppl_k.get("seq_token_counts", []),
+                        "ppl_3bit": by_budget[legacy_key]["ppl"] if legacy_key is not None else float("nan"),
+                        "nll_3bit": by_budget[legacy_key]["nll"] if legacy_key is not None else float("nan"),
+                        "ppl_by_budget": {bk: v["ppl"] for bk, v in by_budget.items()},
+                        "budgets": by_budget,
+                        "seq_nlls": primary["seq_nlls"],
+                        "seq_token_counts": primary["seq_token_counts"],
                         "acquisition_cost_sec": acquisition_cost_sec,
                     })
 
@@ -503,6 +701,28 @@ def run_experiment(args):
                 float(r["achieved_avg_bits"]) for r in valid_runs
                 if r.get("achieved_avg_bits") is not None and not np.isnan(float(r.get("achieved_avg_bits", float("nan"))))
             ]
+            # Per-budget aggregation (every low-shot budget evaluated for this (K, estimator)).
+            ppl_by_budget_summary = {}
+            for bk in sorted({bk for r in run_list for bk in r.get("budgets", {})}, key=float):
+                b_runs = [
+                    r["budgets"][bk] for r in run_list
+                    if bk in r.get("budgets", {})
+                    and r["budgets"][bk].get("success", True)
+                    and bool(r["budgets"][bk].get("bit_assignment", True))
+                    and r["budgets"][bk].get("ppl") is not None
+                    and not np.isnan(float(r["budgets"][bk]["ppl"]))
+                ]
+                b_ppls = [float(r["ppl"]) for r in b_runs]
+                b_bits = [
+                    float(r["achieved_avg_bits"]) for r in b_runs
+                    if r.get("achieved_avg_bits") is not None and not np.isnan(float(r["achieved_avg_bits"]))
+                ]
+                ppl_by_budget_summary[bk] = {
+                    "ppl_mean": float(np.mean(b_ppls)) if b_ppls else None,
+                    "ppl_std": float(np.std(b_ppls)) if len(b_ppls) > 1 else 0.0,
+                    "achieved_avg_bits_mean": float(np.mean(b_bits)) if b_bits else None,
+                    "n_valid_seeds": len(b_runs),
+                }
             low_shot_summary[k_key][est] = {
                 "n_labeled_layers": int(k_key),
                 "spearman_global_mean": float(np.mean([r["spearman_global"] for r in run_list])),
@@ -512,12 +732,28 @@ def run_experiment(args):
                 "ppl_3bit_mean": float(np.mean(valid_ppls)) if valid_ppls else None,
                 "ppl_3bit_std": float(np.std(valid_ppls)) if len(valid_ppls) > 1 else 0.0,
                 "achieved_avg_bits_mean": float(np.mean(valid_bits)) if valid_bits else None,
+                "ppl_by_budget": ppl_by_budget_summary,
                 "acquisition_cost_sec_mean": float(np.mean([r["acquisition_cost_sec"] for r in run_list])),
                 "n_valid_seeds": len(valid_runs),
             }
 
+    cfg_dict = dict(vars(args))
+    if cfg_dict.get("quantizer") == "hqq":
+        from .quantizer import get_effective_hqq_config
+        param = next(iter(model.parameters()), None)
+        dev = param.device if param is not None else torch.device(device)
+        dt = param.dtype if param is not None else torch.float32
+        eff_cfg = get_effective_hqq_config(
+            group_size=quant_group_size,
+            device=dev,
+            dtype=dt,
+        )
+        cfg_dict["hqq_backend"] = eff_cfg["backend"]
+        cfg_dict["hqq_version"] = eff_cfg["version"]
+        cfg_dict["hqq_config"] = eff_cfg
+
     output_payload = {
-        "config": vars(args),
+        "config": cfg_dict,
         "uniform_baselines": uniform_baselines,
         "summary": summary,
         "seed_runs": seed_runs,

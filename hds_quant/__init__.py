@@ -1,7 +1,16 @@
 """HDS-Quant: hyperdimensional sensitivity estimation for mixed-precision quantization."""
 
 from .config import ExperimentConfig, PROJ_FAMILIES
-from .quantizer import quantize_weight_rtn
+from .quantizer import (
+    HQQ_BACKEND_TAG,
+    HQQ_CONFIG,
+    HQQ_VERSION,
+    QUANTIZER_MODES,
+    get_effective_hqq_config,
+    quantize_weight,
+    quantize_weight_hqq,
+    quantize_weight_rtn,
+)
 from .hds_encoder import HDSEncoder
 from .estimators import ESTIMATOR_NAMES, compute_estimators
 from .data_utils import get_calibration_batches, get_eval_tokens
@@ -25,6 +34,13 @@ from .evaluator import (
 __all__ = [
     "ExperimentConfig",
     "PROJ_FAMILIES",
+    "QUANTIZER_MODES",
+    "HQQ_BACKEND_TAG",
+    "HQQ_CONFIG",
+    "HQQ_VERSION",
+    "get_effective_hqq_config",
+    "quantize_weight",
+    "quantize_weight_hqq",
     "quantize_weight_rtn",
     "HDSEncoder",
     "ESTIMATOR_NAMES",

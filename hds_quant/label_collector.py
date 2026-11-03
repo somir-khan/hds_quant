@@ -14,7 +14,7 @@ from .config import PROJ_FAMILIES as _CONFIG_PROJ_FAMILIES
 from .config import ExperimentConfig
 from .estimators import compute_estimators
 from .hds_encoder import HDSEncoder
-from .quantizer import quantize_weight_rtn
+from .quantizer import quantize_weight
 
 PROJ_FAMILIES = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
 assert PROJ_FAMILIES == tuple(n.split(".")[-1] for n in _CONFIG_PROJ_FAMILIES)
@@ -159,16 +159,24 @@ def collect_features_single_pass(
             Y_fp16 = F.linear(X_p, W_fp16)
             fp16_col_norms = torch.linalg.vector_norm(Y_fp16.float(), ord=2, dim=0)
             if anchor_int4:
-                W_ref = quantize_weight_rtn(
-                    W_fp16, bits=config.reference_bit, group_size=config.quant_group_size, clip_ratio=config.clip_ratio
+                W_ref = quantize_weight(
+                    W_fp16,
+                    bits=config.reference_bit,
+                    group_size=config.quant_group_size,
+                    clip_ratio=config.clip_ratio,
+                    quantizer=config.quantizer,
                 )
                 Y_ref = F.linear(X_p, W_ref)
                 del W_ref
             else:
                 Y_ref = Y_fp16
             for b in config.marginal_bits:
-                W_b = quantize_weight_rtn(
-                    W_fp16, bits=b, group_size=config.quant_group_size, clip_ratio=config.clip_ratio
+                W_b = quantize_weight(
+                    W_fp16,
+                    bits=b,
+                    group_size=config.quant_group_size,
+                    clip_ratio=config.clip_ratio,
+                    quantizer=config.quantizer,
                 )
                 Y_b = F.linear(X_p, W_b)
                 R_pb = (Y_ref - Y_b).abs().float()
@@ -248,11 +256,12 @@ def collect_marginal_loss_labels(
         ref_weights = {}
         for p in proj_list:
             w = p["module"].weight.data
-            ref_weights[p["name"]] = quantize_weight_rtn(
+            ref_weights[p["name"]] = quantize_weight(
                 orig_weights_cpu[p["name"]].to(device),
                 bits=config.reference_bit,
                 group_size=config.quant_group_size,
                 clip_ratio=config.clip_ratio,
+                quantizer=config.quantizer,
             ).to(device=w.device, dtype=w.dtype)
             w.copy_(ref_weights[p["name"]])
 
@@ -267,11 +276,12 @@ def collect_marginal_loss_labels(
             w = p["module"].weight.data
             for b in config.marginal_bits:
                 w.copy_(
-                    quantize_weight_rtn(
+                    quantize_weight(
                         orig_weights_cpu[p["name"]].to(device),
                         bits=b,
                         group_size=config.quant_group_size,
                         clip_ratio=config.clip_ratio,
+                        quantizer=config.quantizer,
                     )
                 )
                 try:

@@ -1328,3 +1328,548 @@ def test_review5_fix3_dynamic_fold_column_header():
 
 
 
+
+
+# ==================================================================
+# 1-bit candidate support (candidate_bits=(1, 2, 3, 4)) and 1.5b / 2.0b / 3.0b budgets
+# ==================================================================
+def _one_bit_design_inputs(marginal_bits, n_layers=4):
+    meta_list = [
+        {
+            "name": f"model.layers.{l}.self_attn.q_proj",
+            "layer_idx": l,
+            "family": "q_proj",
+            "family_idx": 0,
+            "num_params": 1024,
+            "d_out": 32,
+            "d_in": 32,
+        }
+        for l in range(n_layers)
+    ]
+    feats, delta_loss = {}, {}
+    for m in meta_list:
+        for b in marginal_bits:
+            k = (m["name"], b)
+            feats[k] = {e: np.ones(4) * (5 - b) for e in SUPERVISED_ESTIMATORS}
+            feats[k]["Scalar-MSE"] = 0.01 * (5 - b)
+            delta_loss[k] = 0.1 * (5 - b) + 0.02 * m["layer_idx"]
+    return meta_list, feats, delta_loss
+
+
+def test_1bit_alloc_cost_multi_is_monotone_and_backward_compatible():
+    from hds_quant.readout_cv import MONO_EPS, _alloc_cost, _alloc_cost_multi
+
+    # (2, 3) reproduces the legacy two-bit helper exactly
+    for raw2, raw3 in [(0.5, 0.1), (0.1, 0.5), (-0.2, 0.3), (float("nan"), 0.2), (float("inf"), -1.0)]:
+        s2, s3 = _alloc_cost(raw2, raw3)
+        multi = _alloc_cost_multi({2: raw2, 3: raw3}, (2, 3))
+        assert multi[2] == pytest.approx(s2) and multi[3] == pytest.approx(s3)
+
+    # (1, 2, 3): non-negative and strictly increasing as bits decrease, even for adversarial raw values
+    out = _alloc_cost_multi({1: -0.5, 2: 0.4, 3: 0.9}, (1, 2, 3))
+    assert out[3] == pytest.approx(0.9)
+    assert out[2] >= out[3] + MONO_EPS - 1e-12
+    assert out[1] >= out[2] + MONO_EPS - 1e-12
+    assert all(v >= 0.0 for v in out.values())
+
+
+def test_1bit_prepare_design_indicator_columns_and_column_weights():
+    meta_list, feats, delta_loss = _one_bit_design_inputs((1, 2, 3))
+    cfg = ExperimentConfig(candidate_bits=(1, 2, 3, 4), device="cpu", cv_folds=2)
+    assert cfg.marginal_bits == (1, 2, 3)
+    d = _prepare_design(feats, delta_loss, meta_list, cfg)
+    assert d["marginal_bits"] == (1, 2, 3)
+    assert d["n_indicator_cols"] == 2
+    X = d["X_all"]["HDS-Hybrid"]
+    assert X.shape[1] == 4 + 2
+    for row, b in zip(X, d["bits"]):
+        assert tuple(row[-2:]) == ((1.0, 0.0) if b == 1 else (0.0, 1.0) if b == 2 else (0.0, 0.0))
+
+    # Default (2, 3) config is unchanged: one indicator column equal to (bits == 2)
+    meta2, feats2, dl2 = _one_bit_design_inputs((2, 3))
+    d2 = _prepare_design(feats2, dl2, meta2, ExperimentConfig(device="cpu", cv_folds=2))
+    assert d2["n_indicator_cols"] == 1
+    assert np.array_equal(d2["X_all"]["HDS-Hybrid"][:, -1], (d2["bits"] == 2).astype(float))
+
+    # Metadata block grows with the number of indicator columns: d_meta = (10 - 1) + n_indicator_cols
+    w1 = _get_column_weights(4106, estimator="HDS-Hybrid", hd_dim=4096)
+    w2 = _get_column_weights(4107, estimator="HDS-Hybrid", hd_dim=4096, n_indicator_cols=2)
+    assert np.allclose(w1[4096:], math.sqrt(4096 / 10.0))
+    assert np.allclose(w2[:4096], 1.0) and np.allclose(w2[4096:], math.sqrt(4096 / 11.0))
+    wm = _get_column_weights(4099, estimator="HDS-Mag-Strict", hd_dim=4096, n_indicator_cols=2)
+    assert np.allclose(wm[4096:], math.sqrt(4096 / 3.0))
+
+
+def test_1bit_build_alloc_costs_and_ranking_metrics():
+    from hds_quant.evaluator import compute_ranking_metrics
+
+    meta_list, _, delta_loss = _one_bit_design_inputs((1, 2, 3))
+    raw = {"Oracle-Loss": dict(delta_loss), "Oracle-Loss-Raw": dict(delta_loss)}
+    alloc = _build_alloc_costs(raw, meta_list, ["Oracle-Loss", "Oracle-Loss-Raw"], marginal_bits=(1, 2, 3), reference_bit=4)
+    for m in meta_list:
+        n = m["name"]
+        assert alloc["Oracle-Loss-Raw"][(n, 4)] == 0.0 and alloc["Oracle-Loss"][(n, 4)] == 0.0
+        for b in (1, 2, 3):
+            assert alloc["Oracle-Loss-Raw"][(n, b)] == pytest.approx(delta_loss[(n, b)])
+        assert alloc["Oracle-Loss"][(n, 1)] > alloc["Oracle-Loss"][(n, 2)] > alloc["Oracle-Loss"][(n, 3)] >= 0.0
+
+    metrics = compute_ranking_metrics(delta_loss, delta_loss, meta_list)  # candidate_bits inferred -> (1, 2, 3)
+    assert metrics["spearman_bit1"] == pytest.approx(1.0)
+    assert metrics["spearman_bit2"] == pytest.approx(1.0)
+    assert metrics["spearman_bit3"] == pytest.approx(1.0)
+    # Without 1-bit labels spearman_bit1 is 0.0 and the two-bit behaviour is unchanged
+    two_bit = {k: v for k, v in delta_loss.items() if k[1] != 1}
+    m2 = compute_ranking_metrics(two_bit, two_bit, meta_list)
+    assert m2["spearman_bit1"] == 0.0 and m2["spearman_bit2"] == pytest.approx(1.0)
+
+
+def test_1bit_ilp_allocation_with_four_candidates():
+    meta_list, _, _ = _one_bit_design_inputs((1, 2, 3))
+    costs = {}
+    for i, m in enumerate(meta_list):
+        for b, c in ((1, 3.0), (2, 1.0), (3, 0.3), (4, 0.0)):
+            costs[(m["name"], b)] = c * (1 + i)
+    res = solve_bit_allocation_ilp(costs, meta_list, target_avg_bits=1.5, candidate_bits=(1, 2, 3, 4))
+    assert res["success"]
+    assert set(res["bit_assignment"].values()) <= {1, 2, 3, 4}
+    assert res["achieved_avg_bits"] <= 1.5 + 1e-9
+
+
+def _smoke_args(tmp_path, **overrides):
+    cache_dir = tmp_path / "cache"
+    output_dir = tmp_path / "results"
+    cache_dir.mkdir(exist_ok=True)
+    output_dir.mkdir(exist_ok=True)
+    base = dict(
+        model_id="smoke",
+        eval_dataset="wikitext2",
+        residual_anchor="fp16_strict",
+        coord_binding="raw_index_strict",
+        readout_grouping="pooled",
+        target_transform="raw",
+        seeds=[42],
+        budgets=[3.00],
+        n_calib_seqs=2,
+        calib_seq_len=32,
+        max_encoded_tokens=64,
+        eval_seq_len=64,
+        batch_size=2,
+        run_low_shot_curve=False,
+        cache_dir=str(cache_dir),
+        reuse_cache=False,
+        output_dir=str(output_dir),
+        run_tag="t",
+        cv_folds=2,
+        smoke_test=True,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_1bit_candidate_and_budgets(tmp_path):
+    """candidate_bits=(1, 2, 3, 4) with budgets [1.50, 2.00, 3.00]: end-to-end incl. incremental cache upgrade."""
+    from scripts.format_tables import build_table2, build_table4_low_shot
+
+    # 1. A legacy (2, 3, 4) run writes a label cache holding only b in {2, 3}.
+    run_experiment(_smoke_args(tmp_path, candidate_bits=[2, 3, 4], run_tag="legacy234"))
+    cache_file = tmp_path / "cache" / "smoke_seed42_labels.pt"
+    legacy = torch.load(cache_file, weights_only=False)
+    assert {int(k[1]) for k in legacy["delta_loss"]} == {2, 3}
+    legacy_delta = dict(legacy["delta_loss"])
+
+    # 2. A 1-bit run reuses that cache: only b = 1 is probed, b in {2, 3} labels are reused verbatim.
+    out = run_experiment(
+        _smoke_args(
+            tmp_path,
+            candidate_bits=[1, 2, 3, 4],
+            budgets=[1.50, 2.00, 3.00],
+            reuse_cache=True,
+            run_low_shot_curve=True,
+            run_tag="onebit",
+        )
+    )
+    upgraded = torch.load(cache_file, weights_only=False)
+    assert upgraded["fingerprint"] != legacy["fingerprint"]
+    assert {int(k[1]) for k in upgraded["delta_loss"]} == {1, 2, 3}
+    for k, v in legacy_delta.items():
+        assert upgraded["delta_loss"][k] == pytest.approx(v)
+    assert upgraded["label_time_sec"] >= legacy["label_time_sec"]
+    assert upgraded["probe_time_sec"] >= legacy["probe_time_sec"]
+    assert upgraded["base_loss_4bit"] == pytest.approx(legacy["base_loss_4bit"])
+
+    run0 = out["seed_runs"][0]
+    assert 0.0 < run0["wall_label_time_sec"] <= run0["label_time_sec"] + 1e-6
+    assert any(k.endswith("|1") for k in run0["delta_loss"])
+
+    # 3. Uniform-1bit baseline, 1-bit ranking metric, three budgets with an identical payload for every estimator.
+    assert "Uniform-1bit" in out["uniform_baselines"] and "Uniform-1bit" in out["summary"]["uniform_baselines"]
+    assert "spearman_bit1" in run0["ranking_metrics"]["HDS-Hybrid"]
+    assert "spearman_bit1_mean" in out["summary"]["ranking_metrics"]["HDS-Hybrid"]
+    assert set(out["summary"]["ppl_metrics"]["HDS-Hybrid"]) == {"1.50", "2.00", "3.00"}
+    for bk in ("1.50", "2.00", "3.00"):
+        allocs = {est: run0["allocations"][est][bk] for est in run0["estimators"]}
+        assert all(a["success"] for a in allocs.values())
+        bits = [a["achieved_avg_bits"] for a in allocs.values()]
+        assert max(bits) - min(bits) < 1e-9
+        assert max(bits) <= float(bk) + 1e-9
+        for a in allocs.values():
+            assert set(a["bit_assignment"].values()) <= {1, 2, 3, 4}
+    # An average of 1.5 bits is impossible without 1-bit projections.
+    assert 1 in run0["allocations"]["Oracle-Loss"]["1.50"]["bit_assignment"].values()
+
+    # 4. Low-shot curve reports one PPL entry per budget (default: budgets in {1.5, 2.0, 3.0}).
+    assert out["low_shot_curve"]
+    for est_dict in out["low_shot_curve"].values():
+        for stats in est_dict.values():
+            assert set(stats["ppl_by_budget"]) == {"1.50", "2.00", "3.00"}
+    for est_dict in out["low_shot_seed_runs"].values():
+        for run_list in est_dict.values():
+            for r in run_list:
+                assert set(r["ppl_by_budget"]) == {"1.50", "2.00", "3.00"} and "ppl_3bit" in r
+
+    # 5. Tables carry the 1-bit baseline and the 1.50b / 2.00b columns.
+    _, df2 = build_table2(out["summary"])
+    assert "Baseline: Uniform-1bit" in set(df2["Estimator"])
+    assert {"PPL @ 1.50b (bits)", "PPL @ 2.00b (bits)", "PPL @ 3.00b (bits)"} <= set(df2.columns)
+    tbl4 = build_table4_low_shot(out)
+    assert "PPL @ 1.50b (bits)" in tbl4 and "PPL @ 2.00b (bits)" in tbl4 and "PPL @ 3.00b (bits)" in tbl4
+
+    # 6. Re-running with the upgraded cache is a plain cache hit (no probing at all).
+    out2 = run_experiment(
+        _smoke_args(
+            tmp_path,
+            candidate_bits=[1, 2, 3, 4],
+            budgets=[1.50, 2.00, 3.00],
+            reuse_cache=True,
+            run_tag="onebit_cached",
+        )
+    )
+    assert out2["seed_runs"][0]["wall_label_time_sec"] == 0.0
+    for k, v in upgraded["delta_loss"].items():
+        assert out2["seed_runs"][0]["delta_loss"][f"{k[0]}|{k[1]}"] == pytest.approx(v)
+
+
+def test_1bit_candidate_bits_validation(tmp_path):
+    with pytest.raises(ValueError, match="reference bit 4"):
+        run_experiment(_smoke_args(tmp_path, budgets=[2.5], candidate_bits=[1, 2, 3]))
+    with pytest.raises(ValueError, match="Low-shot budget"):
+        run_experiment(
+            _smoke_args(tmp_path, budgets=[2.5], candidate_bits=[2, 3, 4], low_shot_budgets=[1.5])
+        )
+
+
+def test_hqq_smoke_experiment(tmp_path):
+    """Verify run_experiment in --smoke-test mode with official quantizer='hqq'."""
+    args = _smoke_args(
+        tmp_path,
+        quantizer="hqq",
+        candidate_bits=[1, 2, 3, 4],
+        budgets=[1.50, 2.00, 3.00],
+        run_tag="hqq_smoke",
+    )
+    out = run_experiment(args)
+    assert out["config"]["quantizer"] == "hqq"
+    assert out["config"]["hqq_backend"] == "official_hqq"
+    assert out["config"]["hqq_version"] == "0.2.8.post1"
+    assert out["config"]["hqq_config"]["axis"] == 1
+    assert out["config"]["hqq_config"]["round_zero"] is False
+    assert out["config"]["hqq_config"]["group_size"] == 64
+    assert out["config"]["hqq_config"]["device_type"] == "cpu"
+    assert out["config"]["hqq_config"]["optimizer_dtype"] == "float32"
+
+    run0 = out["seed_runs"][0]
+    # Check that HQQ cache was saved with quantizer in cache filename and full metadata
+    cache_file = tmp_path / "cache" / "smoke_seed42_hqq_labels.pt"
+    assert cache_file.exists()
+    cached = torch.load(cache_file, weights_only=False)
+    assert cached["quantizer"] == "hqq"
+    assert cached["hqq_backend"] == "official_hqq"
+    assert cached["hqq_version"] == "0.2.8.post1"
+    assert cached["hqq_config"]["axis"] == 1
+    assert cached["hqq_config"]["group_size"] == 64
+    assert {int(k[1]) for k in cached["delta_loss"]} == {1, 2, 3}
+
+    # Verify allocations and evaluations across budgets
+    for bk in ("1.50", "2.00", "3.00"):
+        allocs = {est: run0["allocations"][est][bk] for est in run0["estimators"]}
+        assert all(a["success"] for a in allocs.values())
+        bits = [a["achieved_avg_bits"] for a in allocs.values()]
+        assert max(bits) - min(bits) < 1e-9
+
+    assert "Uniform-1bit" in out["uniform_baselines"]
+    assert "Uniform-2bit" in out["uniform_baselines"]
+
+
+def test_hqq_cache_invalidation_and_incremental_upgrade(tmp_path):
+    """Verify cache keys isolate HQQ from RTN, invalidate legacy custom HQQ caches, and allow incremental upgrade."""
+    from hds_quant.run_experiment import (
+        _build_smoke_model,
+        _compute_label_cache_fingerprint,
+        _get_smoke_calib_ids,
+        _load_cached_labels,
+        _load_or_upgrade_cached_labels,
+    )
+
+    model, _ = _build_smoke_model()
+    calib_ids = _get_smoke_calib_ids(42)
+
+    cfg_rtn = ExperimentConfig(quantizer="rtn", candidate_bits=(2, 3, 4), quant_group_size=64)
+    cfg_hqq = ExperimentConfig(quantizer="hqq", candidate_bits=(2, 3, 4), quant_group_size=64)
+    cfg_hqq_1234 = ExperimentConfig(quantizer="hqq", candidate_bits=(1, 2, 3, 4), quant_group_size=64)
+
+    fp_rtn = _compute_label_cache_fingerprint(model, calib_ids, cfg_rtn)
+    fp_hqq = _compute_label_cache_fingerprint(model, calib_ids, cfg_hqq)
+    fp_hqq_1234 = _compute_label_cache_fingerprint(model, calib_ids, cfg_hqq_1234)
+
+    # 1. RTN and HQQ fingerprints must differ
+    assert fp_rtn != fp_hqq
+    assert fp_hqq != fp_hqq_1234
+
+    # 2. Legacy custom HQQ cache (which had a different fingerprint) must be rejected
+    legacy_cache_file = tmp_path / "legacy_custom_hqq_cache.pt"
+    torch.save(
+        {
+            "delta_loss": {("proj0", 2): 0.1, ("proj0", 3): 0.05},
+            "base_loss_4bit": 2.5,
+            "label_time_sec": 1.0,
+            "fingerprint": "legacy_custom_hqq_hash_xyz",
+            "quantizer": "hqq",
+        },
+        legacy_cache_file,
+    )
+    loaded = _load_cached_labels(legacy_cache_file, fp_hqq)
+    assert loaded is None
+
+    upgraded, wall_sec = _load_or_upgrade_cached_labels(
+        legacy_cache_file, fp_hqq_1234, model, calib_ids, cfg_hqq_1234, batch_size=2, save_path=tmp_path / "saved.pt"
+    )
+    assert upgraded is None
+    assert wall_sec == 0.0
+
+    # 3. Official HQQ cache with (2, 3, 4) CAN be incrementally upgraded to (1, 2, 3, 4)
+    # Collect genuine 2,3 labels for one layer so upgrade logic can merge
+    exp_234 = ExperimentConfig(quantizer="hqq", candidate_bits=(2, 3, 4), quant_group_size=64)
+    labels_234 = collect_marginal_loss_labels(model, calib_ids, exp_234, batch_size=2)
+    hqq_234_cache_file = tmp_path / "official_hqq_234.pt"
+    torch.save(
+        {
+            "delta_loss": labels_234["delta_loss"],
+            "base_loss_4bit": labels_234["base_loss_4bit"],
+            "label_time_sec": labels_234["label_time_sec"],
+            "base_overhead_time_sec": labels_234.get("base_overhead_time_sec", 0.0),
+            "probe_time_sec": labels_234.get("probe_time_sec", labels_234["label_time_sec"]),
+            "restore_time_sec": labels_234.get("restore_time_sec", 0.0),
+            "fingerprint": fp_hqq,
+            "quantizer": "hqq",
+            "hqq_backend": "official_hqq",
+            "hqq_version": "0.2.8.post1",
+        },
+        hqq_234_cache_file,
+    )
+
+    upgrade_target = tmp_path / "official_hqq_upgraded_1234.pt"
+    upgraded, wall_sec = _load_or_upgrade_cached_labels(
+        hqq_234_cache_file, fp_hqq_1234, model, calib_ids, cfg_hqq_1234, batch_size=2, save_path=upgrade_target
+    )
+    assert upgraded is not None
+    assert wall_sec > 0.0
+    assert upgraded["fingerprint"] == fp_hqq_1234
+    assert any(k[1] == 1 for k in upgraded["delta_loss"])
+    assert upgrade_target.exists()
+
+
+def test_hqq_device_precision_fingerprint_isolation(tmp_path):
+    """Verify fingerprints differ between CPU and CUDA devices/precision, and reject cross-device caches."""
+    from hds_quant.run_experiment import (
+        _build_smoke_model,
+        _compute_label_cache_fingerprint,
+        _get_smoke_calib_ids,
+        _load_cached_labels,
+        _load_or_upgrade_cached_labels,
+    )
+    from unittest.mock import MagicMock
+
+    model_cpu, _ = _build_smoke_model()
+    calib_ids = _get_smoke_calib_ids(42)
+
+    cfg = ExperimentConfig(quantizer="hqq", candidate_bits=(2, 3, 4), quant_group_size=64)
+    fp_cpu = _compute_label_cache_fingerprint(model_cpu, calib_ids, cfg)
+
+    # Simulate CUDA model by mocking parameter device
+    model_cuda = MagicMock(spec=model_cpu)
+    model_cuda.named_parameters = model_cpu.named_parameters
+    model_cuda.named_buffers = model_cpu.named_buffers
+    model_cuda.config = model_cpu.config
+    cuda_param = MagicMock()
+    cuda_param.device = torch.device("cuda:0")
+    cuda_param.dtype = torch.float16
+    model_cuda.parameters.return_value = [cuda_param]
+
+    fp_cuda = _compute_label_cache_fingerprint(model_cuda, calib_ids, cfg)
+    assert fp_cpu != fp_cuda, "Fingerprint on CPU (float32 optimizer) must differ from CUDA (float16 optimizer)"
+
+    # An HQQ cache produced on CPU must NOT be loaded when evaluated with the CUDA fingerprint
+    cpu_cache_file = tmp_path / "cpu_hqq_cache.pt"
+    torch.save(
+        {
+            "delta_loss": {("proj0", 2): 0.1, ("proj0", 3): 0.05},
+            "base_loss_4bit": 2.5,
+            "label_time_sec": 1.0,
+            "fingerprint": fp_cpu,
+            "quantizer": "hqq",
+        },
+        cpu_cache_file,
+    )
+    assert _load_cached_labels(cpu_cache_file, fp_cuda) is None
+
+    cfg_1234 = ExperimentConfig(quantizer="hqq", candidate_bits=(1, 2, 3, 4), quant_group_size=64)
+    fp_cuda_1234 = _compute_label_cache_fingerprint(model_cuda, calib_ids, cfg_1234)
+    upgraded, wall_sec = _load_or_upgrade_cached_labels(
+        cpu_cache_file, fp_cuda_1234, model_cuda, calib_ids, cfg_1234, batch_size=2, save_path=tmp_path / "upgraded.pt"
+    )
+    assert upgraded is None and wall_sec == 0.0
+
+
+def test_hqq_revision_14_cache_invalidation(tmp_path):
+    """Verify revision 14 caches lacking precision-aware fingerprinting are rejected and not upgraded."""
+    from hds_quant.run_experiment import (
+        _build_smoke_model,
+        _compute_label_cache_fingerprint,
+        _get_smoke_calib_ids,
+        _load_cached_labels,
+        _load_or_upgrade_cached_labels,
+    )
+
+    model, _ = _build_smoke_model()
+    calib_ids = _get_smoke_calib_ids(42)
+    cfg = ExperimentConfig(quantizer="hqq", candidate_bits=(1, 2, 3, 4), quant_group_size=64)
+    fp_current = _compute_label_cache_fingerprint(model, calib_ids, cfg)
+
+    # Create rev 14 cache with fake old hash
+    rev14_cache_file = tmp_path / "rev14_hqq_cache.pt"
+    torch.save(
+        {
+            "delta_loss": {("proj0", 2): 0.1, ("proj0", 3): 0.05},
+            "base_loss_4bit": 2.5,
+            "label_time_sec": 1.0,
+            "fingerprint": "rev14_hash_without_device_precision",
+            "quantizer": "hqq",
+            "hqq_backend": "official_hqq",
+            "hqq_version": "0.2.8.post1",
+        },
+        rev14_cache_file,
+    )
+    assert _load_cached_labels(rev14_cache_file, fp_current) is None
+
+    upgraded, wall_sec = _load_or_upgrade_cached_labels(
+        rev14_cache_file, fp_current, model, calib_ids, cfg, batch_size=2, save_path=tmp_path / "target.pt"
+    )
+    assert upgraded is None and wall_sec == 0.0
+
+
+def test_hqq_settings_agreement_with_actual_arguments():
+    """Verify get_effective_hqq_config matches arguments actually used during HQQ execution."""
+    from hds_quant.quantizer import (
+        HQQ_AXIS,
+        HQQ_BACKEND_TAG,
+        HQQ_CHANNEL_WISE,
+        HQQ_OPTIMIZE,
+        HQQ_ROUND_ZERO,
+        HQQ_VERSION,
+        get_effective_hqq_config,
+    )
+    import inspect
+    from hqq.core.quantize import Quantizer
+
+    eff_64 = get_effective_hqq_config(group_size=64, device="cpu", dtype=torch.float32)
+    assert eff_64["backend"] == HQQ_BACKEND_TAG == "official_hqq"
+    assert eff_64["version"] == HQQ_VERSION == "0.2.8.post1"
+    assert eff_64["group_size"] == 64
+    assert eff_64["axis"] == HQQ_AXIS == 1
+    assert eff_64["round_zero"] == HQQ_ROUND_ZERO is False
+    assert eff_64["optimize"] == HQQ_OPTIMIZE is True
+    assert eff_64["channel_wise"] == HQQ_CHANNEL_WISE is True
+    assert eff_64["device_type"] == "cpu"
+    assert eff_64["optimizer_dtype"] == "float32"
+
+    eff_cuda = get_effective_hqq_config(group_size=128, device="cuda", dtype=torch.float16)
+    assert eff_cuda["group_size"] == 128
+    assert eff_cuda["device_type"] == "cuda"
+    assert eff_cuda["optimizer_dtype"] == "float16"
+
+    # Verify optimizer defaults match actual Quantizer.optimize_weights default parameters
+    sig = inspect.signature(Quantizer.optimize_weights)
+    opt_p = sig.parameters["opt_params"].default
+    assert eff_64["optimizer_defaults"] == opt_p
+
+
+def test_format_tables_backend_provenance(tmp_path):
+    """Verify format_tables reports 'legacy/unknown' for legacy runs and exact settings for new runs."""
+    import json
+    import sys
+    from scripts.format_tables import main
+
+    # 1. Legacy artifact missing backend provenance
+    legacy_dir = tmp_path / "legacy"
+    legacy_dir.mkdir()
+    legacy_run = {
+        "config": {
+            "model_id": "test_legacy",
+            "quantizer": "hqq",
+            "residual_anchor": "fp16_strict",
+            "coord_binding": "raw_index_strict",
+            "readout_grouping": "pooled",
+            "target_transform": "raw",
+            "seeds": [42],
+        },
+        "summary": {"ranking_metrics": {}, "ppl_metrics": {}},
+        "uniform_baselines": {},
+        "seed_runs": [],
+    }
+    with open(legacy_dir / "run_legacy.json", "w") as f:
+        json.dump(legacy_run, f)
+
+    sys.argv = ["format_tables.py", "--input-dir", str(legacy_dir), "--output-dir", str(legacy_dir)]
+    main()
+    legacy_report = (legacy_dir / "SUPERVISOR_REPORT.md").read_text()
+    assert "legacy/unknown" in legacy_report
+    assert "official_hqq" not in legacy_report
+
+    # 2. Modern artifact with full backend provenance
+    modern_dir = tmp_path / "modern"
+    modern_dir.mkdir()
+    modern_run = {
+        "config": {
+            "model_id": "test_modern",
+            "quantizer": "hqq",
+            "hqq_backend": "official_hqq",
+            "hqq_version": "0.2.8.post1",
+            "hqq_config": {
+                "axis": 1,
+                "round_zero": False,
+                "optimize": True,
+                "group_size": 64,
+                "device_type": "cpu",
+                "optimizer_dtype": "float32",
+            },
+            "residual_anchor": "fp16_strict",
+            "coord_binding": "raw_index_strict",
+            "readout_grouping": "pooled",
+            "target_transform": "raw",
+            "seeds": [42],
+        },
+        "summary": {"ranking_metrics": {}, "ppl_metrics": {}},
+        "uniform_baselines": {},
+        "seed_runs": [],
+    }
+    with open(modern_dir / "run_modern.json", "w") as f:
+        json.dump(modern_run, f)
+
+    sys.argv = ["format_tables.py", "--input-dir", str(modern_dir), "--output-dir", str(modern_dir)]
+    main()
+    modern_report = (modern_dir / "SUPERVISOR_REPORT.md").read_text()
+    assert "HQQ 0.2.8.post1" in modern_report
+    assert "official_hqq" in modern_report
+    assert "group_size=64" in modern_report
+    assert "opt_dtype=float32" in modern_report
+

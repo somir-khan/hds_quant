@@ -131,11 +131,11 @@ def build_table2(summary: dict) -> Tuple[str, pd.DataFrame]:
 
     est_list = [e for e in ORDERED_ESTIMATORS if e in ppl_data] or list(ppl_data.keys())
     budgets = sorted(next(iter(ppl_data.values())).keys()) if ppl_data else []
-    uniform_bits = {"FP16": 16.0, "Uniform-4bit": 4.0, "Uniform-3bit": 3.0, "Uniform-2bit": 2.0}
+    uniform_bits = {"FP16": 16.0, "Uniform-4bit": 4.0, "Uniform-3bit": 3.0, "Uniform-2bit": 2.0, "Uniform-1bit": 1.0}
 
     rows = []
     # Add Uniform baseline rows first
-    for u_name in ("FP16", "Uniform-4bit", "Uniform-3bit", "Uniform-2bit"):
+    for u_name in ("FP16", "Uniform-4bit", "Uniform-3bit", "Uniform-2bit", "Uniform-1bit"):
         if u_name in uniform:
             ppl_val = uniform[u_name]["ppl_mean"]
             ppl_std = uniform[u_name]["ppl_std"]
@@ -183,10 +183,19 @@ def build_table3_ablation(run_files: List[Path]) -> str:
     if len(run_files) < 2:
         return "*Ablation table requires at least 2 run JSON files (e.g., strict_baseline and salience_int4_tweak).*"
 
-    rows = []
+    # Hybrid PPL at the low budgets (1.5b / 2.0b) only appears when some run evaluated them (1-bit runs).
+    extra_budgets = ("1.50", "2.00")
+    parsed = []
     for p in run_files:
         with open(p, "r", encoding="utf-8") as f:
-            data = json.load(f)
+            parsed.append((p, json.load(f)))
+    present_extra = [
+        bk for bk in extra_budgets
+        if any(bk in d.get("summary", {}).get("ppl_metrics", {}).get("HDS-Hybrid", {}) for _, d in parsed)
+    ]
+
+    rows = []
+    for p, data in parsed:
         cfg = data.get("config", {})
         sm = data.get("summary", {})
         tag = cfg.get("run_tag", p.stem.replace("run_", ""))
@@ -198,26 +207,47 @@ def build_table3_ablation(run_files: List[Path]) -> str:
         hybrid_ppl3 = ppl.get("HDS-Hybrid", {}).get("3.00", {}).get("ppl_mean")
         mse_ppl3 = ppl.get("Scalar-MSE", {}).get("3.00", {}).get("ppl_mean")
 
-        rows.append({
+        q_name = cfg.get("quantizer", "rtn")
+        if q_name == "hqq":
+            b_tag = cfg.get("hqq_backend", "legacy/unknown")
+            q_label = f"hqq ({b_tag})"
+        else:
+            q_label = q_name
+
+        row = {
             "Run Tag": tag,
+            "Quantizer": q_label,
             "Anchor": cfg.get("residual_anchor", "-"),
             "Binding": cfg.get("coord_binding", "-"),
             "Grouping": cfg.get("readout_grouping", "-"),
             "Transform": cfg.get("target_transform", "-"),
             f"HDS-Hybrid Spearman {RHO}": f"{float(hybrid_rm.get('spearman_global_mean', 0.0)):.4f}" if not _is_missing(hybrid_rm.get('spearman_global_mean')) else "-",
             "HDS-Hybrid Top-20%": f"{float(hybrid_rm.get('top20_recall_mean', 0.0)):.4f}" if not _is_missing(hybrid_rm.get('top20_recall_mean')) else "-",
-            "PPL @ 3.0b (HDS-Hybrid)": f"{float(hybrid_ppl3):.2f}" if not _is_missing(hybrid_ppl3) else "-",
-            "PPL @ 3.0b (Scalar-MSE)": f"{float(mse_ppl3):.2f}" if not _is_missing(mse_ppl3) else "-",
-        })
+        }
+        for bk in present_extra:
+            v = ppl.get("HDS-Hybrid", {}).get(bk, {}).get("ppl_mean")
+            row[f"PPL @ {float(bk):.1f}b (HDS-Hybrid)"] = f"{float(v):.2f}" if not _is_missing(v) else "-"
+        row["PPL @ 3.0b (HDS-Hybrid)"] = f"{float(hybrid_ppl3):.2f}" if not _is_missing(hybrid_ppl3) else "-"
+        row["PPL @ 3.0b (Scalar-MSE)"] = f"{float(mse_ppl3):.2f}" if not _is_missing(mse_ppl3) else "-"
+        rows.append(row)
     df = pd.DataFrame(rows)
     return tabulate(df, headers="keys", tablefmt="github", showindex=False)
 
 
 def build_table4_low_shot(data: dict) -> str:
-    """Table 4: Fixed-K Layer-Acquisition Curve (K labeled layers in total; ranking on the unlabeled layers)."""
+    """Table 4: Fixed-K Layer-Acquisition Curve (K labeled layers in total; ranking on the unlabeled layers).
+
+    One PPL column per low-shot budget (``PPL @ 1.50b (bits)``, ``PPL @ 2.00b (bits)``, ``PPL @ 3.00b (bits)``...).
+    Legacy results that only carry ``ppl_3bit_*`` fall back to a single ``PPL @ 3.00b (bits)`` column.
+    """
     curve = data.get("low_shot_curve", {})
     if not curve:
         return "*No low-shot curve data available in run.*"
+
+    all_budgets = sorted(
+        {bk for k in curve for stats in curve[k].values() for bk in (stats.get("ppl_by_budget") or {})},
+        key=float,
+    )
 
     rows = []
     k_layers = sorted(curve.keys(), key=int)
@@ -225,18 +255,27 @@ def build_table4_low_shot(data: dict) -> str:
         for est, stats in curve[k].items():
             calib_t = stats.get("acquisition_cost_sec_mean")
             calib_str = f"{float(calib_t):.1f}s" if not _is_missing(calib_t) else "-"
-            rows.append({
+            row = {
                 "Labeled Layers (K)": k,
                 "Estimator": est,
                 f"Spearman {RHO} (Held-Out Layers)": _fmt_ms(stats.get("spearman_global_mean"), stats.get("spearman_global_std")),
                 "Top-20% Recall": _fmt_ms(stats.get("top20_recall_mean"), stats.get("top20_recall_std")),
-                "PPL @ 3.00b (bits)": _ppl_bits_cell(
+            }
+            if all_budgets:
+                by_budget = stats.get("ppl_by_budget") or {}
+                for bk in all_budgets:
+                    bs = by_budget.get(bk, {})
+                    row[f"PPL @ {bk}b (bits)"] = _ppl_bits_cell(
+                        bs.get("ppl_mean"), bs.get("ppl_std"), bs.get("achieved_avg_bits_mean")
+                    )
+            else:
+                row["PPL @ 3.00b (bits)"] = _ppl_bits_cell(
                     stats.get("ppl_3bit_mean"),
                     stats.get("ppl_3bit_std"),
                     stats.get("achieved_avg_bits_mean"),
-                ),
-                "Total K-Layer Calib Time (s)": calib_str,
-            })
+                )
+            row["Total K-Layer Calib Time (s)"] = calib_str
+            rows.append(row)
     df = pd.DataFrame(rows)
     return tabulate(df, headers="keys", tablefmt="github", showindex=False)
 
@@ -330,14 +369,49 @@ def main():
     t3_md = build_table3_ablation(json_files)
     t4_md = build_table4_low_shot(primary_data)
 
+    cfg = primary_data.get('config', {})
+    quantizer_name = cfg.get('quantizer', 'rtn')
+    backend_info = ""
+    if quantizer_name == "hqq":
+        backend_tag = cfg.get("hqq_backend")
+        version_tag = cfg.get("hqq_version")
+        hqq_cfg = cfg.get("hqq_config", {})
+        if not backend_tag and not version_tag and not hqq_cfg:
+            backend_info = "\n**Backend**: `legacy/unknown` (unspecified HQQ implementation)  "
+        else:
+            backend_str = backend_tag if backend_tag else "legacy/unknown"
+            version_str = f" {version_tag}" if version_tag else " unknown"
+            details = []
+            if "axis" in hqq_cfg:
+                details.append(f"axis={hqq_cfg['axis']}")
+            if "round_zero" in hqq_cfg:
+                details.append(f"round_zero={hqq_cfg['round_zero']}")
+            if "optimize" in hqq_cfg:
+                details.append(f"optimize={hqq_cfg['optimize']}")
+            if "group_size" in hqq_cfg:
+                details.append(f"group_size={hqq_cfg['group_size']}")
+            if "device_type" in hqq_cfg:
+                details.append(f"device={hqq_cfg['device_type']}")
+            if "optimizer_dtype" in hqq_cfg:
+                details.append(f"opt_dtype={hqq_cfg['optimizer_dtype']}")
+            if "dequantize_compute_dtype" in hqq_cfg:
+                details.append(f"deq_dtype={hqq_cfg['dequantize_compute_dtype']}")
+
+            detail_str = f" ({', '.join(details)})" if details else ""
+            backend_info = f"\n**Backend**: `HQQ{version_str}` (`{backend_str}`{detail_str})  "
+
     # 1. SUPERVISOR_REPORT.md
     report_content = f"""# HDS-Quant Experiment Evaluation & Supervisor Report
 
 **Primary Run Artifact**: `{primary_file.name}`  
-**Model**: `{primary_data.get('config', {}).get('model_id', 'N/A')}`  
-**Anchor / Binding**: `{primary_data.get('config', {}).get('residual_anchor', 'N/A')}` / `{primary_data.get('config', {}).get('coord_binding', 'N/A')}`  
-**Readout Grouping / Transform**: `{primary_data.get('config', {}).get('readout_grouping', 'N/A')}` / `{primary_data.get('config', {}).get('target_transform', 'N/A')}`  
-**Seeds Evaluated**: `{primary_data.get('config', {}).get('seeds', [])}`  
+**Model**: `{cfg.get('model_id', 'N/A')}`  
+**Quantizer**: `{quantizer_name}`  {backend_info}
+**Anchor / Binding**: `{cfg.get('residual_anchor', 'N/A')}` / `{cfg.get('coord_binding', 'N/A')}`  
+**Readout Grouping / Transform**: `{cfg.get('readout_grouping', 'N/A')}` / `{cfg.get('target_transform', 'N/A')}`  
+**Seeds Evaluated**: `{cfg.get('seeds', [])}`  
+
+> [!NOTE]
+> Evaluation uses simulated weight quantization and dequantization (fake quantization). It evaluates task accuracy and perplexity under exact candidate bit allocations; it does not measure packed low-bit inference latency speedup or memory footprint reduction.
 
 ---
 

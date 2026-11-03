@@ -20,6 +20,7 @@ PROJ_FAMILIES: Tuple[str, ...] = (
 
 RESIDUAL_ANCHORS = ("fp16_strict", "int4_aligned")
 COORD_BINDINGS = ("raw_index_strict", "salience_bucket")
+QUANTIZERS = ("rtn", "hqq")
 # pooled: one ridge readout over everything; per_bit: one per candidate bit-width b;
 # per_family: one per projection family; per_bit_family: one per (b, family).
 READOUT_GROUPINGS = ("pooled", "per_bit", "per_family", "per_bit_family")
@@ -37,6 +38,7 @@ class ExperimentConfig:
     proj_families: Tuple[str, ...] = PROJ_FAMILIES
 
     # --- Quantizer (SPEC §2) ---
+    quantizer: str = "rtn"
     quant_group_size: int = 128
     candidate_bits: Tuple[int, ...] = (2, 3, 4)
     reference_bit: int = 4
@@ -70,6 +72,7 @@ class ExperimentConfig:
     target_transform: str = "raw"
 
     def __post_init__(self) -> None:
+        _check("quantizer", self.quantizer, QUANTIZERS)
         _check("residual_anchor", self.residual_anchor, RESIDUAL_ANCHORS)
         _check("coord_binding", self.coord_binding, COORD_BINDINGS)
         _check("readout_grouping", self.readout_grouping, READOUT_GROUPINGS)

@@ -8,7 +8,16 @@ import pytest
 import torch
 from scipy.stats import trim_mean
 
-from hds_quant import ESTIMATOR_NAMES, ExperimentConfig, HDSEncoder, compute_estimators, quantize_weight_rtn
+from hds_quant import (
+    ESTIMATOR_NAMES,
+    ExperimentConfig,
+    HDSEncoder,
+    QUANTIZER_MODES,
+    compute_estimators,
+    quantize_weight,
+    quantize_weight_hqq,
+    quantize_weight_rtn,
+)
 
 HAS_CUDA = torch.cuda.is_available()
 BINDINGS = ("raw_index_strict", "salience_bucket")
@@ -103,6 +112,164 @@ def test_rtn_clip_ratio_shrinks_range_around_midpoint():
     assert float(Wq.min()) == pytest.approx(1.25, abs=1e-6)
     assert float(Wq.max()) == pytest.approx(1.75, abs=1e-6)
     assert torch.unique(Wq).numel() == 16
+
+
+from hqq.core.quantize import Quantizer
+
+
+@pytest.mark.parametrize("bits", [1, 2, 3, 4])
+def test_hqq_official_adapter_parity_with_direct_package_call(bits):
+    """Verify quantize_weight_hqq has 100% parity with direct Quantizer.quantize call."""
+    torch.manual_seed(42 + bits)
+    W = torch.randn(8, 256)
+    q_direct, meta_direct = Quantizer.quantize(
+        W,
+        nbits=bits,
+        channel_wise=True,
+        group_size=128,
+        optimize=True,
+        round_zero=False,
+        axis=1,
+        bitpack=False,
+        device=str(W.device),
+    )
+    meta_direct["compute_dtype"] = torch.float32 if W.device.type == "cpu" else W.dtype
+    expected = Quantizer.dequantize(q_direct, meta_direct).to(device=W.device, dtype=W.dtype)
+
+    actual = quantize_weight_hqq(W, bits, group_size=128)
+    assert torch.equal(actual, expected)
+
+
+def test_hqq_one_bit_exact_representation_no_collapse():
+    """Regression test: exactly representable symmetric binary input must not collapse to all zeros."""
+    w = torch.tensor([[-0.03125, 0.03125] * 64])
+    q_hqq = quantize_weight_hqq(w, bits=1, group_size=128)
+    q_rtn = quantize_weight_rtn(w, bits=1, group_size=128)
+
+    # 1. Output must contain both unique discrete values (no collapse to 0)
+    vals = q_hqq.unique()
+    assert vals.numel() == 2, f"Expected 2 unique values, but got {vals.tolist()}"
+    assert torch.allclose(vals, torch.tensor([-0.03125, 0.03125], dtype=w.dtype), atol=1e-5)
+
+    # 2. Both values are exactly reconstructed (MSE == 0.0)
+    assert torch.allclose(q_hqq, w, atol=1e-5)
+    assert float((q_hqq - w).pow(2).mean()) == pytest.approx(0.0, abs=1e-8)
+
+    # 3. Matches RTN reference reconstruction exactly
+    assert torch.allclose(q_hqq, q_rtn, atol=1e-5)
+
+
+@pytest.mark.parametrize("bits", [1, 2, 3, 4])
+def test_hqq_discrete_levels_and_no_nan(bits):
+    torch.manual_seed(0)
+    g = 128
+    W = torch.randn(16, 256) * 0.05
+    Wq = quantize_weight_hqq(W, bits, group_size=g)
+    assert Wq.shape == W.shape and Wq.dtype == W.dtype
+    assert not torch.isnan(Wq).any() and not torch.isinf(Wq).any()
+
+    Qg = Wq.reshape(16, -1, g)
+    for r in range(Qg.shape[0]):
+        for c in range(Qg.shape[1]):
+            vals = Qg[r, c]
+            assert torch.unique(vals).numel() <= 2**bits
+
+
+@pytest.mark.parametrize("bits", [1, 2, 3, 4])
+def test_hqq_zero_range_and_single_sign_groups_are_safe(bits):
+    W = torch.randn(8, 256) * 0.1
+    W[0, :128] = 0.0  # all-zero group
+    W[1, :128] = 0.37  # constant non-zero group
+    W[2, 128:] = -1.5  # constant negative group
+    W[3, :128] = torch.linspace(1.0, 2.0, 128)  # strictly positive group
+    Wq = quantize_weight_hqq(W, bits)
+    assert not torch.isnan(Wq).any() and not torch.isinf(Wq).any()
+    assert torch.equal(Wq[0, :128], torch.zeros(128))
+    assert torch.allclose(Wq[1, :128], torch.full((128,), 0.37))
+    assert torch.allclose(Wq[2, 128:], torch.full((128,), -1.5))
+    assert not torch.isnan(quantize_weight_hqq(torch.zeros(4, 128), bits)).any()
+
+
+def test_hqq_shape_dtype_device_and_finite_output():
+    for shape in [(8, 256), (16, 384)]:
+        for dtype in [torch.float32, torch.bfloat16]:
+            W = torch.randn(*shape, dtype=dtype)
+            Wq = quantize_weight_hqq(W, bits=2, group_size=128)
+            assert Wq.shape == W.shape
+            assert Wq.dtype == W.dtype
+            assert Wq.device == W.device
+            assert torch.isfinite(Wq).all()
+
+
+def test_hqq_clipping_behavior():
+    """HQQ rejects clip_ratio != 1.0 with a clear ValueError; RTN supports it."""
+    W = torch.randn(8, 128)
+    with pytest.raises(ValueError, match="does not support clip_ratio != 1.0"):
+        quantize_weight_hqq(W, bits=3, clip_ratio=0.85)
+
+    with pytest.raises(ValueError, match="does not support clip_ratio != 1.0"):
+        quantize_weight(W, bits=3, clip_ratio=0.85, quantizer="hqq")
+
+    # RTN succeeds with clipping
+    rtn_clipped = quantize_weight(W, bits=3, clip_ratio=0.85, quantizer="rtn")
+    assert rtn_clipped.shape == W.shape
+    assert torch.isfinite(rtn_clipped).all()
+
+
+def test_quantize_weight_dispatcher():
+    W = torch.randn(8, 128)
+    rtn = quantize_weight(W, 3, quantizer="rtn")
+    hqq = quantize_weight(W, 3, quantizer="hqq")
+    assert torch.equal(rtn, quantize_weight_rtn(W, 3))
+    assert torch.equal(hqq, quantize_weight_hqq(W, 3))
+    with pytest.raises(ValueError, match="quantizer='invalid' is invalid"):
+        quantize_weight(W, 3, quantizer="invalid")
+
+
+def test_hqq_cuda_parity_if_available():
+    """Verify quantize_weight_hqq parity with direct official HQQ package call on CUDA."""
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+
+    dtypes = [torch.float16]
+    if torch.cuda.is_bf16_supported():
+        dtypes.append(torch.bfloat16)
+
+    # 1. Parity for bits 1, 2, 3, 4 across supported CUDA dtypes
+    for dt in dtypes:
+        for bits in (1, 2, 3, 4):
+            torch.cuda.manual_seed(42 + bits)
+            W = torch.randn(8, 256, device="cuda", dtype=dt)
+
+            q_direct, meta_direct = Quantizer.quantize(
+                W,
+                nbits=bits,
+                channel_wise=True,
+                group_size=128,
+                optimize=True,
+                round_zero=False,
+                axis=1,
+                bitpack=False,
+                device="cuda",
+            )
+            meta_direct["compute_dtype"] = dt
+            expected = Quantizer.dequantize(q_direct, meta_direct).to(device=W.device, dtype=W.dtype)
+
+            actual = quantize_weight_hqq(W, bits, group_size=128)
+
+            assert actual.device.type == "cuda"
+            assert actual.shape == W.shape
+            assert actual.dtype == W.dtype
+            assert torch.isfinite(actual).all()
+            assert torch.equal(actual, expected)
+
+    # 2. Exactly representable one-bit regression on CUDA
+    w = torch.tensor([[-0.03125, 0.03125] * 64], device="cuda", dtype=torch.float16)
+    q_cuda = quantize_weight_hqq(w, bits=1, group_size=128)
+    vals = q_cuda.unique()
+    assert vals.numel() == 2, f"Expected 2 unique values on CUDA, got {vals.tolist()}"
+    assert torch.allclose(vals, torch.tensor([-0.03125, 0.03125], device="cuda", dtype=w.dtype), atol=1e-4)
+    assert torch.allclose(q_cuda, w, atol=1e-4)
 
 
 # ------------------------------------------------------------------ (b) encoder identity

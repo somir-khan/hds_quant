@@ -8,3 +8,4 @@ pandas
 tabulate
 tqdm
 pytest
+hqq==0.2.8.post1
