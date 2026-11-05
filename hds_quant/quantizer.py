@@ -21,7 +21,7 @@ QUANTIZER_MODES = ("rtn", "hqq")
 HQQ_BACKEND_TAG = "official_hqq"
 HQQ_VERSION = getattr(hqq, "__version__", "0.2.8.post1") if hqq is not None else "0.2.8.post1"
 HQQ_AXIS = 1  # axis=1 groups contiguous input-channel chunks within each output row: W.reshape([-1, group_size])
-HQQ_ROUND_ZERO = False  # Official default: floating-point zero-points prevent 1-bit collapse
+HQQ_ROUND_ZERO = False  # Quantizer default; BaseQuantizeConfig instead uses True at 4 bits.
 HQQ_OPTIMIZE = True  # Official proximal optimization enabled
 HQQ_CHANNEL_WISE = True
 
@@ -48,6 +48,8 @@ def get_effective_hqq_config(
 
     Reflects the actual execution settings, tensor device, and computation precision.
     """
+    if axis not in (0, 1):
+        raise ValueError("HQQ axis must be 0 or 1")
     dev = torch.device(device) if device is not None else torch.device("cpu")
     dev_type = dev.type
     # Official HQQ optimizer uses float16 on CUDA and float32 on CPU
@@ -147,10 +149,10 @@ def quantize_weight_hqq(
 ) -> torch.Tensor:
     """Quantize and dequantize ``weight`` using the official HQQ backend (hqq.core.quantize.Quantizer).
 
-    Groups are contiguous input channels within each output row, matching RTN semantics:
-    with axis=1, W is reshaped as [-1, group_size] and min/max/optimization runs along axis 1.
-    Zero-points are kept as floating-point values (round_zero=False, official default), which
-    prevents 1-bit collapse.
+    Official grouping: axis=1 reshapes W to [-1, group_size]; axis=0 reshapes W
+    to [group_size, -1]. Min/max and optimization reduce along the selected axis.
+    Zero-points are kept as floating-point values (round_zero=False), matching the
+    low-level Quantizer default. The high-level BaseQuantizeConfig uses True at 4 bits.
 
     Note: This is simulated (fake) weight quantization/dequantization for mixed-precision
     sensitivity estimation and perplexity evaluation. It does not by itself demonstrate
@@ -167,11 +169,13 @@ def quantize_weight_hqq(
         raise ValueError(f"weight must be 2D [d_out, d_in], got shape {tuple(weight.shape)}")
     if bits not in Quantizer.SUPPORTED_BITS:
         raise ValueError(f"bits={bits} is not supported by HQQ. Supported: {Quantizer.SUPPORTED_BITS}")
+    if axis not in (0, 1):
+        raise ValueError("HQQ axis must be 0 or 1")
     if group_size <= 0:
         raise ValueError(f"group_size must be positive, got {group_size}")
     d_out, d_in = weight.shape
-    if d_in % group_size != 0:
-        raise ValueError(f"d_in={d_in} is not divisible by group_size={group_size}")
+    if weight.numel() % group_size != 0:
+        raise ValueError(f"weight.numel()={weight.numel()} is not divisible by group_size={group_size}")
     if clip_ratio != 1.0:
         raise ValueError(
             f"Official HQQ quantizer does not support clip_ratio != 1.0 (got clip_ratio={clip_ratio}). "
@@ -212,6 +216,7 @@ def quantize_weight(
     group_size: int = 128,
     clip_ratio: float = 1.0,
     quantizer: str = "rtn",
+    hqq_axis: int = HQQ_AXIS,
 ) -> torch.Tensor:
     """Unified weight quantization dispatcher supporting group-wise RTN and official HQQ.
 
@@ -221,6 +226,6 @@ def quantize_weight(
     if quantizer == "rtn":
         return quantize_weight_rtn(weight, bits, group_size=group_size, clip_ratio=clip_ratio)
     elif quantizer == "hqq":
-        return quantize_weight_hqq(weight, bits, group_size=group_size, clip_ratio=clip_ratio)
+        return quantize_weight_hqq(weight, bits, group_size=group_size, clip_ratio=clip_ratio, axis=hqq_axis)
     else:
         raise ValueError(f"quantizer={quantizer!r} is invalid; expected one of {QUANTIZER_MODES}")

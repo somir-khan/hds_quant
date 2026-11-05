@@ -111,6 +111,7 @@ def _compute_label_cache_fingerprint(model: nn.Module, calib_ids: torch.Tensor, 
             from .quantizer import get_effective_hqq_config
             eff_cfg = get_effective_hqq_config(
                 group_size=exp_config.quant_group_size,
+                axis=exp_config.hqq_axis,
                 device=model_device,
                 dtype=model_dtype,
             )
@@ -233,6 +234,7 @@ def _load_or_upgrade_cached_labels(
                     dt = param.dtype if param is not None else torch.float32
                     eff_cfg = get_effective_hqq_config(
                         group_size=exp_config.quant_group_size,
+                        axis=exp_config.hqq_axis,
                         device=dev,
                         dtype=dt,
                     )
@@ -271,6 +273,8 @@ def parse_args():
     parser.add_argument("--model-id", type=str, default="meta-llama/Llama-3.2-1B")
     parser.add_argument("--eval-dataset", type=str, default="wikitext2", choices=["wikitext2", "c4"])
     parser.add_argument("--quantizer", type=str, default="rtn", choices=["rtn", "hqq"])
+    parser.add_argument("--hqq-axis", type=int, choices=[0, 1], default=1)
+    parser.add_argument("--quant-group-size", type=int, default=None, help="Defaults to 128 (64 for smoke tests).")
     parser.add_argument("--residual-anchor", type=str, default="fp16_strict", choices=["fp16_strict", "int4_aligned"])
     parser.add_argument("--coord-binding", type=str, default="raw_index_strict", choices=["raw_index_strict", "salience_bucket"])
     parser.add_argument("--readout-grouping", type=str, default="per_bit_family", choices=["pooled", "per_bit", "per_family", "per_bit_family"])
@@ -309,6 +313,8 @@ def parse_args():
 
 def run_experiment(args):
     device = "cuda" if torch.cuda.is_available() and not args.smoke_test else "cpu"
+    if getattr(args, "quant_group_size", None) is not None and args.quant_group_size <= 0:
+        raise ValueError("quant_group_size must be positive")
     os.makedirs(args.cache_dir, exist_ok=True)
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -328,7 +334,7 @@ def run_experiment(args):
         model, eval_ids = _build_smoke_model()
         tokenizer = None
         num_layers = 4
-        quant_group_size = 64
+        quant_group_size = getattr(args, "quant_group_size", None) or 64
         hd_dim = 512
         seeds = [s for s in args.seeds if s in (42, 100)] or [42, 100]
         smoke_budgets = (2.50, 3.00, 3.50) + ((1.50, 2.00) if 1 in candidate_bits else ())
@@ -340,7 +346,7 @@ def run_experiment(args):
         model = AutoModelForCausalLM.from_pretrained(args.model_id, torch_dtype=torch.float16 if device == "cuda" else torch.float32).to(device)
         model.eval()
         num_layers = getattr(model.config, "num_hidden_layers", 16)
-        quant_group_size = 128
+        quant_group_size = getattr(args, "quant_group_size", None) or 128
         hd_dim = 4096
         seeds = args.seeds
         budgets = args.budgets
@@ -367,6 +373,7 @@ def run_experiment(args):
         model_name=args.model_id,
         num_layers=num_layers,
         quantizer=getattr(args, "quantizer", "rtn"),
+        hqq_axis=getattr(args, "hqq_axis", 1),
         quant_group_size=quant_group_size,
         hd_dim=hd_dim,
         candidate_bits=candidate_bits,
@@ -414,6 +421,7 @@ def run_experiment(args):
             model_name=args.model_id,
             num_layers=num_layers,
             quantizer=getattr(args, "quantizer", "rtn"),
+            hqq_axis=getattr(args, "hqq_axis", 1),
             quant_group_size=quant_group_size,
             candidate_bits=candidate_bits,
             hd_dim=hd_dim,
@@ -503,6 +511,7 @@ def run_experiment(args):
                 dt = param.dtype if param is not None else torch.float32
                 eff_cfg = get_effective_hqq_config(
                     group_size=exp_config.quant_group_size,
+                    axis=exp_config.hqq_axis,
                     device=dev,
                     dtype=dt,
                 )
@@ -738,6 +747,8 @@ def run_experiment(args):
             }
 
     cfg_dict = dict(vars(args))
+    cfg_dict["hqq_axis"] = base_eval_config.hqq_axis
+    cfg_dict["quant_group_size"] = quant_group_size
     if cfg_dict.get("quantizer") == "hqq":
         from .quantizer import get_effective_hqq_config
         param = next(iter(model.parameters()), None)
@@ -745,6 +756,7 @@ def run_experiment(args):
         dt = param.dtype if param is not None else torch.float32
         eff_cfg = get_effective_hqq_config(
             group_size=quant_group_size,
+            axis=base_eval_config.hqq_axis,
             device=dev,
             dtype=dt,
         )

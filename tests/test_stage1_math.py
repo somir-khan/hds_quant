@@ -226,7 +226,8 @@ def test_quantize_weight_dispatcher():
         quantize_weight(W, 3, quantizer="invalid")
 
 
-def test_hqq_cuda_parity_if_available():
+@pytest.mark.parametrize("axis", [0, 1])
+def test_hqq_cuda_parity_if_available(axis):
     """Verify quantize_weight_hqq parity with direct official HQQ package call on CUDA."""
     if not torch.cuda.is_available():
         pytest.skip("requires CUDA")
@@ -248,14 +249,14 @@ def test_hqq_cuda_parity_if_available():
                 group_size=128,
                 optimize=True,
                 round_zero=False,
-                axis=1,
+                axis=axis,
                 bitpack=False,
                 device="cuda",
             )
             meta_direct["compute_dtype"] = dt
             expected = Quantizer.dequantize(q_direct, meta_direct).to(device=W.device, dtype=W.dtype)
 
-            actual = quantize_weight_hqq(W, bits, group_size=128)
+            actual = quantize_weight_hqq(W, bits, group_size=128, axis=axis)
 
             assert actual.device.type == "cuda"
             assert actual.shape == W.shape

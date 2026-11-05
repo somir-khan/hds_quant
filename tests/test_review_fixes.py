@@ -1558,11 +1558,13 @@ def test_1bit_candidate_bits_validation(tmp_path):
         )
 
 
-def test_hqq_smoke_experiment(tmp_path):
+@pytest.mark.parametrize("axis", [0, 1])
+def test_hqq_smoke_experiment(tmp_path, axis):
     """Verify run_experiment in --smoke-test mode with official quantizer='hqq'."""
     args = _smoke_args(
         tmp_path,
         quantizer="hqq",
+        hqq_axis=axis,
         candidate_bits=[1, 2, 3, 4],
         budgets=[1.50, 2.00, 3.00],
         run_tag="hqq_smoke",
@@ -1571,7 +1573,7 @@ def test_hqq_smoke_experiment(tmp_path):
     assert out["config"]["quantizer"] == "hqq"
     assert out["config"]["hqq_backend"] == "official_hqq"
     assert out["config"]["hqq_version"] == "0.2.8.post1"
-    assert out["config"]["hqq_config"]["axis"] == 1
+    assert out["config"]["hqq_config"]["axis"] == axis
     assert out["config"]["hqq_config"]["round_zero"] is False
     assert out["config"]["hqq_config"]["group_size"] == 64
     assert out["config"]["hqq_config"]["device_type"] == "cpu"
@@ -1585,7 +1587,7 @@ def test_hqq_smoke_experiment(tmp_path):
     assert cached["quantizer"] == "hqq"
     assert cached["hqq_backend"] == "official_hqq"
     assert cached["hqq_version"] == "0.2.8.post1"
-    assert cached["hqq_config"]["axis"] == 1
+    assert cached["hqq_config"]["axis"] == axis
     assert cached["hqq_config"]["group_size"] == 64
     assert {int(k[1]) for k in cached["delta_loss"]} == {1, 2, 3}
 
