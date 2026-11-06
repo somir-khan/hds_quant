@@ -1,0 +1,46 @@
+{
+  "schema": "generalization_v1",
+  "experiment_id": "llama2_7b_wikitext_preflight_v1",
+  "purpose": "preflight",
+  "model_id": "meta-llama/Llama-2-7b-hf",
+  "model_revision": "main",
+  "dataset": {
+    "name": "wikitext2",
+    "revision": "main",
+    "eval_chunks": 8
+  },
+  "seeds": [
+    42
+  ],
+  "k_layers": [
+    2
+  ],
+  "methods": [
+    "HDS-Hybrid",
+    "Coord-Rank-Hist",
+    "Scalar-MSE-Ridge"
+  ],
+  "probe_bits": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "allocation_bits": [
+    2,
+    3,
+    4
+  ],
+  "budgets": [
+    3.0,
+    3.5
+  ],
+  "calibration": {
+    "n_sequences": 64,
+    "seq_len": 1024,
+    "max_encoded_tokens": 4096
+  },
+  "eval_seq_len": 2048,
+  "batch_size": 1,
+  "full_reference": false
+}

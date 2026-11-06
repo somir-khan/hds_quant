@@ -58,7 +58,7 @@ def memory_finish(device, baseline):
     return {"peak_cuda_allocated_bytes": peak, "peak_cuda_increment_bytes": peak - baseline}
 
 
-def run_trial(model, calib_ids, eval_ids, cfg, method, k, budgets, seed, batch_size):
+def run_trial(model, calib_ids, eval_ids, cfg, method, k, budgets, seed, batch_size, allocation_bits=None):
     """No label or feature caches: everything needed by this method is executed."""
     device = next(model.parameters()).device
     meta = discover_target_projections(model)
@@ -89,7 +89,7 @@ def run_trial(model, calib_ids, eval_ids, cfg, method, k, budgets, seed, batch_s
     for budget in budgets:
         t0 = time.perf_counter()
         allocation = solve_bit_allocation_ilp(fit["alloc_costs"][method], meta, budget,
-                                             candidate_bits=cfg.candidate_bits)
+                                             candidate_bits=tuple(allocation_bits or cfg.candidate_bits))
         sync(device)
         elapsed = time.perf_counter() - t0
         if not allocation["success"]:
@@ -117,7 +117,7 @@ def run_trial(model, calib_ids, eval_ids, cfg, method, k, budgets, seed, batch_s
     return result
 
 
-def run_full_reference(model, calib_ids, eval_ids, cfg, budgets, seed, batch_size):
+def run_full_reference(model, calib_ids, eval_ids, cfg, budgets, seed, batch_size, allocation_bits=None):
     """Measured-loss baseline; no unnecessary feature extraction or regression."""
     device = next(model.parameters()).device
     meta = discover_target_projections(model)
@@ -133,7 +133,7 @@ def run_full_reference(model, calib_ids, eval_ids, cfg, budgets, seed, batch_siz
     allocations = {}
     for budget in budgets:
         t0 = time.perf_counter()
-        a = solve_bit_allocation_ilp(costs, meta, budget, candidate_bits=cfg.candidate_bits)
+        a = solve_bit_allocation_ilp(costs, meta, budget, candidate_bits=tuple(allocation_bits or cfg.candidate_bits))
         sync(device)
         elapsed = time.perf_counter() - t0
         if not a["success"]:
@@ -150,7 +150,7 @@ def run_full_reference(model, calib_ids, eval_ids, cfg, budgets, seed, batch_siz
     return result, labels["delta_loss"]
 
 
-def run(args):
+def run(args, data_preparer=None, model_check=None):
     if not args.smoke_test and not torch.cuda.is_available():
         raise RuntimeError("This benchmark requires CUDA; --smoke-test is available offline")
     if any(k < 2 for k in args.k_layers):
@@ -163,13 +163,24 @@ def run(args):
         raise ValueError("Candidates must contain reference bit 4 and a lower precision")
     if not args.budgets or any(b < min(args.candidate_bits) or b > 4 for b in args.budgets):
         raise ValueError("Budget outside candidate precision range")
+    allocation_bits = tuple(getattr(args, "allocation_bits", None) or args.candidate_bits)
+    if not set(allocation_bits) <= set(args.candidate_bits) or 4 not in allocation_bits:
+        raise ValueError("Allocation bits must be a subset of probe candidates and contain 4")
+    if any(b < min(allocation_bits) or b > max(allocation_bits) for b in args.budgets):
+        raise ValueError("Budget outside allocation precision range")
+    prepared = None
     if args.smoke_test:
         model, eval_ids = _build_smoke_model()
         tokenizer = None
     else:
-        tokenizer = AutoTokenizer.from_pretrained(args.model_id)
-        model = AutoModelForCausalLM.from_pretrained(args.model_id, torch_dtype=torch.float16).to("cuda").eval()
-        eval_ids = get_eval_tokens(tokenizer, args.eval_dataset, args.eval_seq_len)
+        revision = getattr(args, "model_revision", None)
+        tokenizer = AutoTokenizer.from_pretrained(args.model_id, revision=revision)
+        model = AutoModelForCausalLM.from_pretrained(args.model_id, revision=revision, torch_dtype=torch.float16).to("cuda").eval()
+        if data_preparer is None:
+            eval_ids = get_eval_tokens(tokenizer, args.eval_dataset, args.eval_seq_len)
+        else:
+            prepared = data_preparer(tokenizer)
+            eval_ids = prepared["eval_ids"]
     device = next(model.parameters()).device
     n_layers = model.config.num_hidden_layers
     if any(k >= n_layers for k in args.k_layers):
@@ -178,6 +189,15 @@ def run(args):
               "torch_version": torch.__version__, "trials": [], "references": [], "calibration_token_sha256": {},
               "timing_scope": "Direct synchronized execution; excludes model/data loading, warmup, JSON I/O, and test evaluation. No label/feature caches. Both-budget wall time and individual-budget times are separate.",
               "memory_scope": "CUDA allocated tensors during calibration, including resident model; increment is above trial-start allocation. CPU feature payload excludes object overhead. No inference memory/speed claim."}
+    report["allocation_candidate_bits"] = list(allocation_bits)
+    report["full_reference_enabled"] = not getattr(args, "skip_full_reference", False)
+    report["model_resolved_revision"] = getattr(model.config, "_commit_hash", None)
+    if prepared is not None:
+        report["data_manifest"] = prepared["manifest"]
+    if model_check is not None:
+        report["projection_parity"] = model_check(model)
+    report["evaluation_token_sha256"] = hashlib.sha256(eval_ids.cpu().numpy().tobytes()).hexdigest()
+    report["evaluation_chunks"] = len(eval_ids)
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
 
@@ -199,8 +219,12 @@ def run(args):
         report["config"] = cfg.to_dict()
         report["config"]["seeds"] = args.seeds
         report["hqq_config"] = get_effective_hqq_config(cfg.quant_group_size, device, next(model.parameters()).dtype, axis=0)
-        calib = _get_smoke_calib_ids(seed) if args.smoke_test else get_calibration_batches(
-            tokenizer, args.n_calib_seqs, args.calib_seq_len, seed, args.eval_dataset)
+        if args.smoke_test:
+            calib = _get_smoke_calib_ids(seed)
+        elif prepared is not None:
+            calib = prepared["calib_by_seed"][seed]
+        else:
+            calib = get_calibration_batches(tokenizer, args.n_calib_seqs, args.calib_seq_len, seed, args.eval_dataset)
         report["calibration_token_sha256"][str(seed)] = hashlib.sha256(calib.numpy().tobytes()).hexdigest()
         # Warm model inference only; no sensitivity labels or features are acquired here.
         with torch.inference_mode():
@@ -217,12 +241,15 @@ def run(args):
             random.Random(seed + k).shuffle(order)
             for method in order:
                 print(f"Starting seed={seed} K={k} method={method}; fresh selected-block acquisition", flush=True)
-                trial = run_trial(model, calib, eval_ids, cfg, method, k, args.budgets, seed, args.batch_size)
+                trial = run_trial(model, calib, eval_ids, cfg, method, k, args.budgets, seed, args.batch_size, allocation_bits=allocation_bits)
                 report["trials"].append(trial)
                 save()
                 print(f"Done: calibration={trial['calibration_wall_sec']:.2f}s, labels={trial['probe_label_count']}", flush=True)
+        if getattr(args, "skip_full_reference", False):
+            save()
+            continue
         # Full labels are collected AFTER all limited-label decisions, and never supplied to them.
-        ref, full_labels = run_full_reference(model, calib, eval_ids, cfg, args.budgets, seed, args.batch_size)
+        ref, full_labels = run_full_reference(model, calib, eval_ids, cfg, args.budgets, seed, args.batch_size, allocation_bits=allocation_bits)
         report["references"].append(ref)
         for trial in (t for t in report["trials"] if t["seed"] == seed):
             heldout = {key: value for key, value in full_labels.items()
@@ -245,6 +272,8 @@ def parse_args():
     p.add_argument("--methods", choices=METHODS, nargs="+", default=list(METHODS))
     p.add_argument("--budgets", type=float, nargs="+", default=[3.0, 3.5])
     p.add_argument("--candidate-bits", type=int, choices=(1, 2, 3, 4), nargs="+", default=[1, 2, 3, 4])
+    p.add_argument("--allocation-bits", type=int, choices=(1, 2, 3, 4), nargs="+", default=None)
+    p.add_argument("--skip-full-reference", action="store_true")
     p.add_argument("--n-calib-seqs", type=int, default=64)
     p.add_argument("--calib-seq-len", type=int, default=1024)
     p.add_argument("--max-encoded-tokens", type=int, default=4096)

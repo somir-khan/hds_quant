@@ -40,7 +40,15 @@ def summarize(root, make_plots=True):
             w = csv.DictWriter(f, fieldnames=list(values[0]))
             w.writeheader()
             w.writerows(values)
-    lines = ["True limited-label calibration", "", data["timing_scope"], data["memory_scope"], "",
+    info = data["args"]
+    identity = [f"Experiment: {info.get('experiment_id', 'historical_limited_labels')}",
+                f"Purpose: {info.get('experiment_purpose', 'benchmark')}",
+                f"Model: {info['model_id']}", f"Dataset: {info['eval_dataset']}",
+                f"Probe candidates: {data['config']['candidate_bits']}",
+                f"Allocation candidates: {data.get('allocation_candidate_bits', data['config']['candidate_bits'])}"]
+    if info.get("experiment_purpose") == "preflight":
+        identity.append("PREFLIGHT ONLY: short evaluation, one seed, no full-label reference; not a full benchmark.")
+    lines = ["True limited-label calibration", *identity, "", data["timing_scope"], data["memory_scope"], "",
         "Times below are measured shared calibration + the allocation solve for that budget.",
         "Standard deviations are across calibration seeds, not confidence intervals.", "",
         "Method | K blocks | Bits | PPL mean +/- std | Calibration seconds mean +/- std"]
