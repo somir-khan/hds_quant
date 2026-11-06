@@ -1,4 +1,4 @@
-# C4 validation and larger-model preflight
+# C4 validation and larger-model experiments
 
 Use the main Git checkout on LONI. All launchers load the existing project-root
 `.env` through `scripts/load_hf_env.sh` before starting Python, and explicitly
@@ -80,11 +80,84 @@ Inspect successful completion, parity checks, baseline PPL, GPU memory, and
 trial duration before defining a full larger-model benchmark. Do not launch
 the full 7B/8B x C4 grid based only on a model-loading check.
 
+## 3. Full Llama-3.1-8B WikiText-2 benchmark
+
+The 8B preflight job 1165151 completed successfully. This separate benchmark
+uses the same model and dataset commit revisions recorded by that run, rather
+than resolving `main` again. The preflight configuration remains available.
+
+After committing/pushing the new files and pulling the same branch on LONI:
+
+```bash
+cd /ddnB/work/somir49/hds_quant
+git pull --ff-only
+mkdir -p results_hqq_8b_wikitext
+sbatch scripts/run_llama31_8b_wikitext_a100.sh
+```
+
+Configuration: `configs/generalization/llama31_8b_wikitext.json`.
+
+* Model: `meta-llama/Llama-3.1-8B-Instruct`, revision
+  `0e9e39f249a16976918f6564b8830bc894c89659`.
+* WikiText-2 raw, revision `b08601e04326c79dfdd32d625aee71d232d685c3`;
+  train calibration and test evaluation.
+* HDS-Hybrid, Coord-Rank-Hist, Scalar-MSE-Ridge; K=2/4/8 of 32 blocks;
+  seeds 42/100/2026. These are 27 independently timed limited-label trials.
+* Both 3.0- and 3.5-bit budgets, with exactly the same quantizer and estimator
+  settings used in the preflight: axis 0, group 128, floating zero points;
+  probe choices {1,2,3,4}, final allocation choices {2,3,4}, reference 4.
+* Calibration: 64 x 1024 tokens; residual features use 4096 tokens.
+* Evaluation: 141 disjoint 2048-token chunks, or 288,627 scored next-token
+  predictions, at batch size 1. This is the fixed complete-chunk evaluation
+  budget, not a sliding-window evaluation of every test token.
+* FP16, uniform 3-bit and uniform 4-bit baselines use that same evaluation set.
+* Full measured-loss acquisition over all 32 blocks runs after the limited-label
+  decisions for each seed. The three references produce six evaluated budget
+  allocations; limited trials produce 54. No preflight label/feature caches
+  or results are reused. `Oracle-Loss` denotes this measured-loss allocator,
+  not a proven optimum of end-to-end perplexity.
+* One A100, 13 CPUs (matching the recorded preflight), 96 GB host RAM, and a
+  24-hour time request. The full grid takes substantially longer than the
+  preflight. The request is a scheduling limit, not a measured duration;
+  actual runtime and peak memory must be checked from this benchmark.
+
+The launcher sources the project-root `.env` through the existing helper and
+uses `venv/bin/python` (or `HQQ_PYTHON`); no package upgrade is needed. Keep the
+same environment as the successful preflight. Package versions, source hashes,
+resolved revisions and token hashes are recorded with the results.
+
+Monitor the SLURM job and logs:
+
+```bash
+squeue -u "$USER"
+tail -f results_hqq_8b_wikitext/8b_<JOBID>.log
+```
+
+The completed job writes `SUMMARY.txt`, `summary.csv`, `trials.csv`, raw JSON
+and manifests beneath
+`results_hqq_8b_wikitext/job_<JOBID>_llama31_8b_wikitext_allocation234_v1/`.
+Both `limited_labels.json` and `experiment_manifest.json` must say
+`"complete": true`. There should be 27 limited trials, three full references,
+60 evaluated allocations, and 141 evaluation chunks. Check that all four
+selected-projection parity checks passed and all achieved budgets match.
+
+Partial JSON checkpoints are diagnostic records, not automatic resume points.
+An interrupted job needs a fresh output directory; the runner rejects reuse.
+For a completed-run replay, pass its `resolved_experiment_config.json` as the
+first argument to this SLURM script.
+
+Use uniform 3-bit as the budget-matched baseline at 3.0 bits, and the measured
+reference at both budgets. Assess seed variation as well as mean perplexity.
+The preflight had HDS close to uniform at 3 bits; this benchmark tests whether
+that pattern persists. Do not use the short preflight PPL as a directly
+comparable full-benchmark number or tune configurations on the test results.
+
 ## Results remain separate
 
 * C4: `results_hqq_c4_1b/job_<JOBID>_c4_1b_allocation234_v1/`
 * 8B preflight: `results_hqq_large_preflight/job_<JOBID>_llama31_8b_wikitext_preflight_v1/`
 * 7B preflight: `results_hqq_large_preflight/job_<JOBID>_llama2_7b_wikitext_preflight_v1/`
+* 8B benchmark: `results_hqq_8b_wikitext/job_<JOBID>_llama31_8b_wikitext_allocation234_v1/`
 
 The new config-driven runner rejects existing output directories. Historical
 launchers keep their original defaults; new optional hooks reuse the tested

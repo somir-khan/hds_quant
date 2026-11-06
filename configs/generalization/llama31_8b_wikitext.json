@@ -1,0 +1,26 @@
+{
+  "schema": "generalization_v1",
+  "experiment_id": "llama31_8b_wikitext_allocation234_v1",
+  "purpose": "benchmark",
+  "model_id": "meta-llama/Llama-3.1-8B-Instruct",
+  "model_revision": "0e9e39f249a16976918f6564b8830bc894c89659",
+  "dataset": {
+    "name": "wikitext2",
+    "revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+    "eval_chunks": 141
+  },
+  "seeds": [42, 100, 2026],
+  "k_layers": [2, 4, 8],
+  "methods": ["HDS-Hybrid", "Coord-Rank-Hist", "Scalar-MSE-Ridge"],
+  "probe_bits": [1, 2, 3, 4],
+  "allocation_bits": [2, 3, 4],
+  "budgets": [3.0, 3.5],
+  "calibration": {
+    "n_sequences": 64,
+    "seq_len": 1024,
+    "max_encoded_tokens": 4096
+  },
+  "eval_seq_len": 2048,
+  "batch_size": 1,
+  "full_reference": true
+}
