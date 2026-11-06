@@ -2,6 +2,26 @@
 
 ## Submit on LONI
 
+### One-time Hugging Face authentication setup
+
+The zero-point ablation and axis-0 pilot launchers automatically load the
+project-root `.env` before Python starts. On the cluster, run once:
+
+```bash
+cp -n .env.example .env
+chmod 600 .env
+nano .env
+```
+
+Replace the placeholder with your Hugging Face read token. `.env` is ignored
+by Git; commit only `.env.example`. The file uses Bash assignment syntax
+and is sourced as trusted local shell code. Values in it override inherited
+variables. It persists between logins, so subsequent jobs only need `sbatch`.
+The token's account must have access to `meta-llama/Llama-3.2-1B-Instruct`.
+This also supports an optional `HF_HOME` pointing to your existing cache.
+For a manual Python command, first run `source scripts/load_hf_env.sh` from
+the project root. Launchers without this helper do not automatically load it.
+
 Copy the updated `hds_quant/`, `scripts/`, and `tests/` files to the project
 directory containing your cluster virtual environment. Run there:
 

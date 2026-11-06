@@ -16,6 +16,7 @@
 # sbatch scripts/run_hqq_zero_ablation_a100.sh
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
+source scripts/load_hf_env.sh
 if [ ! -f hds_quant/run_experiment.py ] || [ ! -f tests/test_hqq_zero_policy.py ]; then
     echo "Submit from the updated project root containing hds_quant/, tests/, scripts/, and venv/." >&2
     echo "Merge the update folder's contents into that root before submitting." >&2

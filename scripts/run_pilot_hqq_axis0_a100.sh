@@ -19,6 +19,7 @@ set -euo pipefail
 
 # Submit from the project root; SLURM must find results_hqq_axis0/ before this script starts.
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
+source scripts/load_hf_env.sh
 if [ ! -f "hds_quant/run_experiment.py" ]; then
     echo "Submit this job from the project directory containing hds_quant/." >&2
     exit 1
