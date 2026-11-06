@@ -152,6 +152,7 @@ def evaluate_perplexity(
                     clip_ratio=config.clip_ratio,
                     quantizer=config.quantizer,
                     hqq_axis=config.hqq_axis,
+                    hqq_zero_policy=config.hqq_zero_policy,
                 )
                 mod.weight.data.copy_(w_q.to(device=mod.weight.data.device, dtype=mod.weight.data.dtype))
         elif uniform_bit is not None:
@@ -163,6 +164,7 @@ def evaluate_perplexity(
                     clip_ratio=config.clip_ratio,
                     quantizer=config.quantizer,
                     hqq_axis=config.hqq_axis,
+                    hqq_zero_policy=config.hqq_zero_policy,
                 )
                 mod.weight.data.copy_(w_q.to(device=mod.weight.data.device, dtype=mod.weight.data.dtype))
 

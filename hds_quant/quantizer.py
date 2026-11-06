@@ -26,6 +26,12 @@ HQQ_OPTIMIZE = True  # Official proximal optimization enabled
 HQQ_CHANNEL_WISE = True
 
 
+def resolve_hqq_round_zero(bits: int, zero_policy: str = "floating") -> bool:
+    if zero_policy not in ("floating", "round4"):
+        raise ValueError("hqq_zero_policy must be 'floating' or 'round4'")
+    return zero_policy == "round4" and bits == 4
+
+
 def _get_official_hqq_optimizer_defaults() -> Dict[str, Union[float, int]]:
     """Derive and validate the actual pinned-package defaults for HQQ proximal optimization."""
     if Quantizer is not None and hasattr(Quantizer, "optimize_weights"):
@@ -43,6 +49,7 @@ def get_effective_hqq_config(
     round_zero: bool = HQQ_ROUND_ZERO,
     optimize: bool = HQQ_OPTIMIZE,
     axis: int = HQQ_AXIS,
+    zero_policy: str = "floating",
 ) -> Dict[str, Any]:
     """Construct an immutable, exact dictionary of the effective HQQ configuration.
 
@@ -50,6 +57,7 @@ def get_effective_hqq_config(
     """
     if axis not in (0, 1):
         raise ValueError("HQQ axis must be 0 or 1")
+    resolve_hqq_round_zero(4, zero_policy)
     dev = torch.device(device) if device is not None else torch.device("cpu")
     dev_type = dev.type
     # Official HQQ optimizer uses float16 on CUDA and float32 on CPU
@@ -69,7 +77,7 @@ def get_effective_hqq_config(
         "group_size": int(group_size),
         "channel_wise": HQQ_CHANNEL_WISE,
         "optimize": bool(optimize),
-        "round_zero": bool(round_zero),
+        "round_zero": "4-bit only" if zero_policy == "round4" else bool(round_zero),
         "device_type": dev_type,
         "optimizer_dtype": optimizer_dtype,
         "dequantize_compute_dtype": dequantize_compute_dtype,
@@ -217,6 +225,7 @@ def quantize_weight(
     clip_ratio: float = 1.0,
     quantizer: str = "rtn",
     hqq_axis: int = HQQ_AXIS,
+    hqq_zero_policy: str = "floating",
 ) -> torch.Tensor:
     """Unified weight quantization dispatcher supporting group-wise RTN and official HQQ.
 
@@ -226,6 +235,7 @@ def quantize_weight(
     if quantizer == "rtn":
         return quantize_weight_rtn(weight, bits, group_size=group_size, clip_ratio=clip_ratio)
     elif quantizer == "hqq":
-        return quantize_weight_hqq(weight, bits, group_size=group_size, clip_ratio=clip_ratio, axis=hqq_axis)
+        return quantize_weight_hqq(weight, bits, group_size=group_size, clip_ratio=clip_ratio,
+                                   axis=hqq_axis, round_zero=resolve_hqq_round_zero(bits, hqq_zero_policy))
     else:
         raise ValueError(f"quantizer={quantizer!r} is invalid; expected one of {QUANTIZER_MODES}")

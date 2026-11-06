@@ -112,6 +112,7 @@ def _compute_label_cache_fingerprint(model: nn.Module, calib_ids: torch.Tensor, 
             eff_cfg = get_effective_hqq_config(
                 group_size=exp_config.quant_group_size,
                 axis=exp_config.hqq_axis,
+                zero_policy=exp_config.hqq_zero_policy,
                 device=model_device,
                 dtype=model_dtype,
             )
@@ -235,6 +236,7 @@ def _load_or_upgrade_cached_labels(
                     eff_cfg = get_effective_hqq_config(
                         group_size=exp_config.quant_group_size,
                         axis=exp_config.hqq_axis,
+                        zero_policy=exp_config.hqq_zero_policy,
                         device=dev,
                         dtype=dt,
                     )
@@ -274,6 +276,8 @@ def parse_args():
     parser.add_argument("--eval-dataset", type=str, default="wikitext2", choices=["wikitext2", "c4"])
     parser.add_argument("--quantizer", type=str, default="rtn", choices=["rtn", "hqq"])
     parser.add_argument("--hqq-axis", type=int, choices=[0, 1], default=1)
+    parser.add_argument("--hqq-zero-policy", choices=["floating", "round4"], default="floating")
+    parser.add_argument("--estimators", nargs="+", choices=ALL_ESTIMATORS, default=None, help="Restrict allocation/PPL evaluation; shared features and CV are still computed for all methods.")
     parser.add_argument("--quant-group-size", type=int, default=None, help="Defaults to 128 (64 for smoke tests).")
     parser.add_argument("--residual-anchor", type=str, default="fp16_strict", choices=["fp16_strict", "int4_aligned"])
     parser.add_argument("--coord-binding", type=str, default="raw_index_strict", choices=["raw_index_strict", "salience_bucket"])
@@ -374,6 +378,7 @@ def run_experiment(args):
         num_layers=num_layers,
         quantizer=getattr(args, "quantizer", "rtn"),
         hqq_axis=getattr(args, "hqq_axis", 1),
+        hqq_zero_policy=getattr(args, "hqq_zero_policy", "floating"),
         quant_group_size=quant_group_size,
         hd_dim=hd_dim,
         candidate_bits=candidate_bits,
@@ -422,6 +427,7 @@ def run_experiment(args):
             num_layers=num_layers,
             quantizer=getattr(args, "quantizer", "rtn"),
             hqq_axis=getattr(args, "hqq_axis", 1),
+            hqq_zero_policy=getattr(args, "hqq_zero_policy", "floating"),
             quant_group_size=quant_group_size,
             candidate_bits=candidate_bits,
             hd_dim=hd_dim,
@@ -512,6 +518,7 @@ def run_experiment(args):
                 eff_cfg = get_effective_hqq_config(
                     group_size=exp_config.quant_group_size,
                     axis=exp_config.hqq_axis,
+                    zero_policy=exp_config.hqq_zero_policy,
                     device=dev,
                     dtype=dt,
                 )
@@ -541,6 +548,8 @@ def run_experiment(args):
         t_cv = time.perf_counter()
         cv_out = cross_validate_estimators(features, delta_loss, meta_list, exp_config, seed=seed)
         cv_time_sec = float(time.perf_counter() - t_cv)
+        if getattr(args, "estimators", None):
+            cv_out["estimators"] = tuple(dict.fromkeys(args.estimators))
         raw_preds = cv_out["raw_predictions"]
         alloc_costs = cv_out["alloc_costs"]
         estimator_readout_time_sec = dict(cv_out["estimator_readout_time_sec"])
@@ -748,6 +757,7 @@ def run_experiment(args):
 
     cfg_dict = dict(vars(args))
     cfg_dict["hqq_axis"] = base_eval_config.hqq_axis
+    cfg_dict["hqq_zero_policy"] = base_eval_config.hqq_zero_policy
     cfg_dict["quant_group_size"] = quant_group_size
     if cfg_dict.get("quantizer") == "hqq":
         from .quantizer import get_effective_hqq_config
@@ -757,6 +767,7 @@ def run_experiment(args):
         eff_cfg = get_effective_hqq_config(
             group_size=quant_group_size,
             axis=base_eval_config.hqq_axis,
+            zero_policy=base_eval_config.hqq_zero_policy,
             device=dev,
             dtype=dt,
         )

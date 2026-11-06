@@ -40,6 +40,7 @@ class ExperimentConfig:
     # --- Quantizer (SPEC §2) ---
     quantizer: str = "rtn"
     hqq_axis: int = 1  # Preserve historical runs; select 0 explicitly for HQQ quality experiments.
+    hqq_zero_policy: str = "floating"  # floating everywhere | round4: round zero only at 4 bits
     quant_group_size: int = 128
     candidate_bits: Tuple[int, ...] = (2, 3, 4)
     reference_bit: int = 4
@@ -76,6 +77,7 @@ class ExperimentConfig:
         _check("quantizer", self.quantizer, QUANTIZERS)
         if self.hqq_axis not in (0, 1):
             raise ValueError("hqq_axis must be 0 or 1")
+        _check("hqq_zero_policy", self.hqq_zero_policy, ("floating", "round4"))
         _check("residual_anchor", self.residual_anchor, RESIDUAL_ANCHORS)
         _check("coord_binding", self.coord_binding, COORD_BINDINGS)
         _check("readout_grouping", self.readout_grouping, READOUT_GROUPINGS)

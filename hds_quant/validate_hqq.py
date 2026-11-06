@@ -17,7 +17,7 @@ from .config import ExperimentConfig
 from .data_utils import get_eval_tokens
 from .evaluator import evaluate_perplexity
 from .label_collector import discover_target_projections
-from .quantizer import get_effective_hqq_config, quantize_weight_hqq
+from .quantizer import get_effective_hqq_config, quantize_weight_hqq, resolve_hqq_round_zero
 from .run_experiment import _build_smoke_model
 
 
@@ -56,7 +56,7 @@ def validate(args):
             if group <= 0:
                 raise ValueError("group sizes must be positive")
             for bits in args.bits:
-                cfg = ExperimentConfig(quantizer="hqq", hqq_axis=axis, quant_group_size=group)
+                cfg = ExperimentConfig(quantizer="hqq", hqq_axis=axis, quant_group_size=group, hqq_zero_policy=args.hqq_zero_policy)
                 fake = evaluate_perplexity(model, ids, meta, cfg, uniform_bit=bits,
                                           orig_weights_cpu=originals, batch_size=args.batch_size)
                 max_weight_error = 0.0
@@ -66,11 +66,11 @@ def validate(args):
                         packed_config = BaseQuantizeConfig(nbits=bits, group_size=group, axis=axis)
                         # Match the experiment's explicit floating-zero policy.
                         # BaseQuantizeConfig otherwise defaults to round_zero=True at 4 bits.
-                        packed_config["weight_quant_params"]["round_zero"] = False
+                        packed_config["weight_quant_params"]["round_zero"] = resolve_hqq_round_zero(bits, args.hqq_zero_policy)
                         official = HQQLinear(layer, packed_config,
                                              del_orig=False, compute_dtype=param.dtype, device=str(param.device))
                         expected = quantize_weight_hqq(originals[m["name"]].to(param.device), bits,
-                                                       group_size=group, axis=axis)
+                                                       group_size=group, axis=axis, round_zero=resolve_hqq_round_zero(bits, args.hqq_zero_policy))
                         max_weight_error = max(max_weight_error, float((official.dequantize().float() - expected.float()).abs().max()))
                         model.set_submodule(m["name"], official)
                     # Empty projection list: evaluate the installed HQQLinear modules directly.
@@ -79,7 +79,7 @@ def validate(args):
                     for m in meta:
                         model.set_submodule(m["name"], m["module"])
                 gap = abs(fake["nll"] - packed["nll"])
-                row = {"bits": bits, "hqq_config": get_effective_hqq_config(group, param.device, param.dtype, axis=axis),
+                row = {"bits": bits, "hqq_config": get_effective_hqq_config(group, param.device, param.dtype, axis=axis, zero_policy=args.hqq_zero_policy),
                        "fake": fake, "packed_hqqlinear": packed, "max_weight_abs_error": max_weight_error,
                        "nll_abs_difference": gap, "nll_parity_pass": gap <= args.nll_atol}
                 report["comparisons"].append(row)
@@ -96,6 +96,7 @@ def validate(args):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model-id", default="meta-llama/Llama-3.2-1B-Instruct")
+    p.add_argument("--hqq-zero-policy", choices=["floating", "round4"], default="floating")
     p.add_argument("--device", choices=["cpu", "cuda"], default="cuda")
     p.add_argument("--axes", nargs="+", type=int, choices=[0, 1], default=[0, 1])
     p.add_argument("--group-sizes", nargs="+", type=int, default=[128])

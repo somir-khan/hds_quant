@@ -166,6 +166,7 @@ def collect_features_single_pass(
                     clip_ratio=config.clip_ratio,
                     quantizer=config.quantizer,
                     hqq_axis=config.hqq_axis,
+                    hqq_zero_policy=config.hqq_zero_policy,
                 )
                 Y_ref = F.linear(X_p, W_ref)
                 del W_ref
@@ -179,6 +180,7 @@ def collect_features_single_pass(
                     clip_ratio=config.clip_ratio,
                     quantizer=config.quantizer,
                     hqq_axis=config.hqq_axis,
+                    hqq_zero_policy=config.hqq_zero_policy,
                 )
                 Y_b = F.linear(X_p, W_b)
                 R_pb = (Y_ref - Y_b).abs().float()
@@ -265,6 +267,7 @@ def collect_marginal_loss_labels(
                 clip_ratio=config.clip_ratio,
                 quantizer=config.quantizer,
                 hqq_axis=config.hqq_axis,
+                hqq_zero_policy=config.hqq_zero_policy,
             ).to(device=w.device, dtype=w.dtype)
             w.copy_(ref_weights[p["name"]])
 
@@ -286,6 +289,7 @@ def collect_marginal_loss_labels(
                         clip_ratio=config.clip_ratio,
                         quantizer=config.quantizer,
                         hqq_axis=config.hqq_axis,
+                        hqq_zero_policy=config.hqq_zero_policy,
                     )
                 )
                 try:
