@@ -12,7 +12,7 @@ import torch.nn.functional as F
 
 from .config import PROJ_FAMILIES as _CONFIG_PROJ_FAMILIES
 from .config import ExperimentConfig
-from .estimators import compute_estimators
+from .estimators import compute_estimators, compute_selected_estimator
 from .hds_encoder import HDSEncoder
 from .quantizer import quantize_weight
 
@@ -72,6 +72,7 @@ def collect_features_single_pass(
     config: ExperimentConfig,
     hds_encoder: HDSEncoder,
     batch_size: int = 8,
+    feature_estimator: Optional[str] = None,
 ) -> dict:
     """One calibration forward pass over the (unmodified) model, then per-layer feature extraction.
 
@@ -186,18 +187,24 @@ def collect_features_single_pass(
                 R_pb = (Y_ref - Y_b).abs().float()
                 _sync(device)
                 t_est = time.perf_counter()
-                features[(p["name"], b)] = compute_estimators(
-                    R_pb,
-                    fp16_col_norms,
-                    p["family_idx"],
-                    hds_encoder,
-                    coord_binding=config.coord_binding,
-                    hist_bins=config.hist_bins,
-                    hist_max=config.hist_max,
-                    trim_frac=config.trim_frac,
-                    winsor_quantile=config.winsor_quantile,
-                    timings=estimator_feature_time,
-                )
+                if feature_estimator is not None:
+                    features[(p["name"], b)] = compute_selected_estimator(
+                        R_pb, fp16_col_norms, p["family_idx"], hds_encoder,
+                        feature_estimator, coord_binding=config.coord_binding,
+                    )
+                else:
+                    features[(p["name"], b)] = compute_estimators(
+                        R_pb,
+                        fp16_col_norms,
+                        p["family_idx"],
+                        hds_encoder,
+                        coord_binding=config.coord_binding,
+                        hist_bins=config.hist_bins,
+                        hist_max=config.hist_max,
+                        trim_frac=config.trim_frac,
+                        winsor_quantile=config.winsor_quantile,
+                        timings=estimator_feature_time,
+                    )
                 _sync(device)
                 estimator_wall += time.perf_counter() - t_est
                 del W_b, Y_b, R_pb

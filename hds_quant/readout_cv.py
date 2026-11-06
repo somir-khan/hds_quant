@@ -450,6 +450,7 @@ def _prepare_design(
     meta_list: List[dict],
     config: ExperimentConfig,
     require_all_labels: bool = True,
+    estimator_names=None,
 ) -> dict:
     """Shared sample/design-matrix construction for the CV and the fixed-K acquisition experiments."""
     grouping, transform = config.readout_grouping, config.target_transform
@@ -502,7 +503,7 @@ def _prepare_design(
         indicator = np.zeros((len(bits), 1), dtype=np.float64)  # single marginal bit: constant column keeps d_meta fixed
     X_all = {
         e: np.hstack([np.stack([_base_feature(features_by_proj_bit[k], e) for k in names]), indicator])
-        for e in SUPERVISED_ESTIMATORS
+        for e in (SUPERVISED_ESTIMATORS if estimator_names is None else estimator_names)
     }
     return {
         "projs": projs,
@@ -635,11 +636,15 @@ def evaluate_fixed_k_layer_acquisition(
     config: ExperimentConfig,
     k_layers: int,
     seed: int = 42,
+    estimator_names=None,
 ) -> dict:
     """Label ONE fixed, depth-stratified subset of ``k_layers`` layers and predict all the others."""
     if int(k_layers) < 1:
         raise ValueError("k_layers must be >= 1")
-    d = _prepare_design(features_by_proj_bit, delta_loss_by_proj_bit, meta_list, config, require_all_labels=False)
+    selected_estimators = tuple(SUPERVISED_ESTIMATORS if estimator_names is None else estimator_names)
+    if not selected_estimators or any(e not in SUPERVISED_ESTIMATORS for e in selected_estimators):
+        raise ValueError("Unsupported or empty estimator selection")
+    d = _prepare_design(features_by_proj_bit, delta_loss_by_proj_bit, meta_list, config, require_all_labels=False, estimator_names=selected_estimators)
     projs, names, layer, y, keys, X_all = d["projs"], d["names"], d["layer"], d["y"], d["keys"], d["X_all"]
     transform = d["transform"]
 
@@ -668,11 +673,11 @@ def evaluate_fixed_k_layer_acquisition(
     keys_te = [keys[i] for i in te_idx]
     y_tr_raw = y[tr_idx]
 
-    heldout: Dict[str, Dict[Tuple[str, int], float]] = {e: {} for e in SUPERVISED_ESTIMATORS}
-    full: Dict[str, Dict[Tuple[str, int], float]] = {e: {} for e in SUPERVISED_ESTIMATORS}
-    readout_time: Dict[str, float] = {e: 0.0 for e in SUPERVISED_ESTIMATORS}
+    heldout: Dict[str, Dict[Tuple[str, int], float]] = {e: {} for e in selected_estimators}
+    full: Dict[str, Dict[Tuple[str, int], float]] = {e: {} for e in selected_estimators}
+    readout_time: Dict[str, float] = {e: 0.0 for e in selected_estimators}
 
-    for e in SUPERVISED_ESTIMATORS:
+    for e in selected_estimators:
         for i in tr_idx:
             full[e][names[i]] = float(y[i])  # known measured labels on the acquired layers
         if te_idx.size == 0:
@@ -710,12 +715,12 @@ def evaluate_fixed_k_layer_acquisition(
         "alloc_costs": _build_alloc_costs(
             full,
             projs,
-            SUPERVISED_ESTIMATORS,
+            selected_estimators,
             marginal_bits=d["marginal_bits"],
             reference_bit=config.reference_bit,
         ),
         "estimator_readout_time_sec": readout_time,
-        "estimators": SUPERVISED_ESTIMATORS,
+        "estimators": selected_estimators,
         "readout_grouping": d["grouping"],
         "target_transform": transform,
     }

@@ -36,6 +36,29 @@ _STD_EPS = 1e-6
 COORD_HIST_BUCKETS = 16  # B_c_hist: canonical coordinate buckets of the explicit (non-hyperdimensional) control
 
 
+@torch.no_grad()
+def compute_selected_estimator(R_pb, fp16_col_norms, proj_family_idx, encoder,
+                               estimator, coord_binding="salience_bucket"):
+    """Compute ONLY one limited-label benchmark feature, matching compute_estimators."""
+    if estimator not in ("Scalar-MSE-Ridge", "Coord-Rank-Hist", "HDS-Hybrid"):
+        raise ValueError(f"Unsupported standalone estimator: {estimator}")
+    R = R_pb.to(device=encoder.device, dtype=torch.float32)
+    mse = float(R.pow(2).mean())
+    if estimator == "Scalar-MSE-Ridge":
+        return {"Scalar-MSE": mse}
+    log_mse = math.log(mse + _LOG_EPS)
+    q99 = _sorted_quantile(torch.sort(R.reshape(-1)).values, 0.99)
+    F = encoder.level_frequencies(R)
+    one_hot = torch.zeros(len(PROJ_FAMILIES), dtype=torch.float32, device=R.device)
+    one_hot[proj_family_idx] = 1.0
+    meta = torch.cat([R.new_tensor([log_mse, math.log(q99 + _LOG_EPS)]), one_hot])
+    if estimator == "HDS-Hybrid":
+        vector = encoder.bind(F, fp16_col_norms, coord_binding)
+    else:
+        vector = _coord_rank_hist(F, fp16_col_norms, encoder, coord_binding)
+    return {estimator: torch.cat([vector, meta]).cpu()}
+
+
 class _Clock:
     """Lap timer that synchronizes CUDA first (so asynchronous kernels are charged to the right segment)."""
 

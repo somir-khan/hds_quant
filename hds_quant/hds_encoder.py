@@ -31,6 +31,7 @@ class HDSEncoder:
         seed: int = 42,
         device: Union[str, torch.device] = "cuda",
         token_chunk: int = 4096,
+        build_codebooks: bool = True,
     ) -> None:
         if isinstance(device, str) and device.startswith("cuda") and not torch.cuda.is_available():
             warnings.warn("CUDA is not available; HDSEncoder is falling back to CPU.", stacklevel=2)
@@ -50,9 +51,9 @@ class HDSEncoder:
         if self.flips_per_level * (num_levels - 1) > hd_dim:
             raise ValueError("hd_dim too small to flip disjoint dimension sets for every level")
 
-        self.L = self._build_level_codebook().to(self.device)
-        self.C_raw = self._random_bipolar(max_coords, seed + 1).to(self.device)
-        self.C_bucket = self._random_bipolar(num_buckets, seed + 2).to(self.device)
+        self.L = self._build_level_codebook().to(self.device) if build_codebooks else None
+        self.C_raw = self._random_bipolar(max_coords, seed + 1).to(self.device) if build_codebooks else None
+        self.C_bucket = self._random_bipolar(num_buckets, seed + 2).to(self.device) if build_codebooks else None
         self._jl_cache: dict = {}
 
     # ------------------------------------------------------------------ codebooks
@@ -128,6 +129,8 @@ class HDSEncoder:
         of ``[d_out, D]``. This is algebraically identical to materializing ``C_mapped``.
         """
         _check_binding(coord_binding)
+        if self.L is None:
+            raise ValueError("HDS binding requires build_codebooks=True")
         d_out = F.shape[0]
         if coord_binding == "raw_index_strict":
             if d_out > self.max_coords:
