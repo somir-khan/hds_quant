@@ -152,12 +152,73 @@ The preflight had HDS close to uniform at 3 bits; this benchmark tests whether
 that pattern persists. Do not use the short preflight PPL as a directly
 comparable full-benchmark number or tune configurations on the test results.
 
+## 4. Full Llama-3.1-8B C4 benchmark
+
+This is the next dataset check after the completed 8B WikiText-2 benchmark
+(job 1165153). It reuses the same calibration, estimator, quantizer and
+allocation implementations. Only the dataset specification and experiment
+identity change relative to `llama31_8b_wikitext.json`.
+
+After committing/pushing these changes and pulling the same branch on LONI:
+
+```bash
+cd /ddnB/work/somir49/hds_quant
+git pull --ff-only
+mkdir -p results_hqq_8b_c4
+sbatch scripts/run_llama31_8b_c4_a100.sh
+```
+
+Configuration: `configs/generalization/llama31_8b_c4.json`.
+
+* Llama-3.1-8B-Instruct revision
+  `0e9e39f249a16976918f6564b8830bc894c89659`, matching the 8B WikiText-2 run.
+* C4 revision `1588ec454efa1a09f29cd18ddd04fe05fc8653a2`, matching the completed
+  1B C4 run. Stream the same first English validation shard, with document
+  indices [0,20000) for calibration and [20000,21100) for held-out evaluation.
+* Three methods, seeds 42/100/2026, K=2/4/8, budgets 3.0/3.5; retain the entire
+  grid instead of selecting K=4 based on the WikiText-2 results.
+* HQQ axis 0, group size 128, floating zero points; probe bits {1,2,3,4},
+  reference bit 4, final allocations {2,3,4}.
+* Calibration: 64 x 1024 tokens, with 4096 tokens for residual features.
+* Evaluation: the first 141 disjoint 2048-token chunks of the held-out stream,
+  with 288,627 scored next-token predictions; batch size 1.
+* FP16, uniform 3-bit and uniform 4-bit baselines, plus independent full
+  measured-loss references over all 32 blocks for each seed. There are 27
+  limited trials, three references, and 60 evaluated budget allocations.
+* One A100, 13 CPUs, 96 GB host RAM and a 24-hour scheduling limit, matching
+  the 8B WikiText-2 launcher. This is a full benchmark, not a short preflight.
+
+The existing shared launcher loads the project-root `.env` and uses
+`venv/bin/python` (or `HQQ_PYTHON`). Keep the environment from the successful
+8B run; no package upgrades are required. Each method acquires its own labels
+and features for timing. Previous C4 or WikiText-2 labels/features are not reused.
+Selected q/up projection parity checks and the existing source/package/data
+manifests are included automatically.
+
+```bash
+squeue -u "$USER"
+tail -f results_hqq_8b_c4/8b_c4_<JOBID>.log
+```
+
+Results are saved to
+`results_hqq_8b_c4/job_<JOBID>_llama31_8b_c4_allocation234_v1/`.
+Check `"complete": true` in both result and experiment manifests, 141 evaluated
+chunks, all four parity checks passing, and the trial/reference counts above.
+The existing runner rejects an existing output directory; partial checkpoints
+do not provide automatic resume. Replay a completed run by passing its
+`resolved_experiment_config.json` as the SLURM script's first argument.
+
+Compare each method to the uniform and measured-loss baselines within C4.
+Use the two 8B datasets to assess whether quality, seed stability and calibration
+tradeoffs persist; raw perplexities across datasets are not directly comparable.
+
 ## Results remain separate
 
 * C4: `results_hqq_c4_1b/job_<JOBID>_c4_1b_allocation234_v1/`
 * 8B preflight: `results_hqq_large_preflight/job_<JOBID>_llama31_8b_wikitext_preflight_v1/`
 * 7B preflight: `results_hqq_large_preflight/job_<JOBID>_llama2_7b_wikitext_preflight_v1/`
 * 8B benchmark: `results_hqq_8b_wikitext/job_<JOBID>_llama31_8b_wikitext_allocation234_v1/`
+* 8B C4 benchmark: `results_hqq_8b_c4/job_<JOBID>_llama31_8b_c4_allocation234_v1/`
 
 The new config-driven runner rejects existing output directories. Historical
 launchers keep their original defaults; new optional hooks reuse the tested
