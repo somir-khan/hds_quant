@@ -1,5 +1,7 @@
 *.txt
 !requirements.txt
+!requirements-amq.txt
+results_hqq_amq_comparison/
 venv/
 research_concept_proposal.pdf
 SPEC.md

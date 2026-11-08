@@ -1,5 +1,9 @@
 # C4 validation and larger-model experiments
 
+For the separate Coord-Rank-Exact/HDS comparison and LIM external baseline,
+see [REPRESENTATION_CONTROLS.md](REPRESENTATION_CONTROLS.md). Historical launchers
+and configurations below keep their original experiment scope.
+
 Use the main Git checkout on LONI. All launchers load the existing project-root
 `.env` through `scripts/load_hf_env.sh` before starting Python, and explicitly
 use `venv/bin/python` (or HQQ_PYTHON). Model access must already be approved for

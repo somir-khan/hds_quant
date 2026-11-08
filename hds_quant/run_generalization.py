@@ -15,7 +15,7 @@ from hqq.core.quantize import BaseQuantizeConfig, HQQLinear
 from .generalization_data import prepare_dataset
 from .label_collector import discover_target_projections
 from .quantizer import quantize_weight_hqq
-from .run_limited_labels import METHODS, run as run_limited
+from .run_limited_labels import SUPPORTED_METHODS, run as run_limited
 
 
 def validate_spec(spec):
@@ -35,7 +35,7 @@ def validate_spec(spec):
         raise ValueError("Invalid C4 document ranges")
     if spec["probe_bits"] != [1, 2, 3, 4] or spec["allocation_bits"] != [2, 3, 4]:
         raise ValueError("This protocol fixes probe bits to {1,2,3,4} and allocation bits to {2,3,4}")
-    if not spec["methods"] or set(spec["methods"]) - set(METHODS):
+    if not spec["methods"] or set(spec["methods"]) - set(SUPPORTED_METHODS):
         raise ValueError("Invalid methods")
     if not spec["k_layers"] or min(spec["k_layers"]) < 2 or not spec["seeds"]:
         raise ValueError("Invalid K/seeds")
@@ -78,10 +78,11 @@ def check_projections(model):
     return rows
 
 
-def run_config(config_path, output_dir, smoke_test=False):
+def run_config(config_path, output_dir, smoke_test=False, *, spec_validator=validate_spec,
+               extra_trial_runner=None, extra_source_files=(), comparison_protocol=None):
     raw = Path(config_path).read_bytes()
     spec = json.loads(raw)
-    validate_spec(spec)
+    spec_validator(spec)
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=False)
     (output / "experiment_config.json").write_bytes(raw)
@@ -96,6 +97,9 @@ def run_config(config_path, output_dir, smoke_test=False):
                  "readout_cv.py", "label_collector.py", "quantizer.py", "allocator.py", "evaluator.py", "hds_encoder.py"):
         path = Path(__file__).with_name(name)
         manifest["code_sha256"][name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    project_root = Path(__file__).resolve().parents[1]
+    for name in extra_source_files:
+        manifest["code_sha256"][name] = hashlib.sha256((project_root / name).read_bytes()).hexdigest()
     manifest_path = output / "experiment_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     if smoke_test:
@@ -120,12 +124,15 @@ def run_config(config_path, output_dir, smoke_test=False):
         n_calib_seqs=cal["n_sequences"], calib_seq_len=cal["seq_len"], max_encoded_tokens=cal["max_encoded_tokens"],
         eval_seq_len=spec["eval_seq_len"], eval_chunks=spec["dataset"]["eval_chunks"], batch_size=spec["batch_size"],
         skip_full_reference=not spec["full_reference"], output_dir=str(output), smoke_test=smoke_test)
+    if comparison_protocol is not None:
+        args.comparison_protocol = comparison_protocol
     print(f"Experiment {spec['experiment_id']}: {spec['purpose']}; fixed probes={args.candidate_bits}, allocations={args.allocation_bits}", flush=True)
     def data_preparer(tokenizer):
         prepared = prepare_dataset(tokenizer, args, spec["dataset"], dataset_revision)
         (output / "data_manifest.json").write_text(json.dumps(prepared["manifest"], indent=2), encoding="utf-8")
         return prepared
-    result = run_limited(args, data_preparer=data_preparer, model_check=check_projections)
+    result = run_limited(args, data_preparer=data_preparer, model_check=check_projections,
+                         extra_trial_runner=extra_trial_runner)
     manifest.update(complete=True, evaluated_chunks=result["evaluation_chunks"],
                     model_resolved_revision=result["model_resolved_revision"],
                     evaluation_token_sha256=result["evaluation_token_sha256"],

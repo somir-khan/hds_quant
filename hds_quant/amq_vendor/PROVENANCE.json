@@ -1,0 +1,32 @@
+{
+  "repository": "https://github.com/dlwns147/amq",
+  "commit": "618334902a5b43813607caf73025fc9595a55026",
+  "files": {
+    "space.py": {
+      "source": "amq/search/space.py",
+      "upstream_sha256": "5b1c2ec14c8118d5cb93c380b65617566bc3069695b7109311660cc2500d1e9f"
+    },
+    "problem.py": {
+      "source": "amq/search/problem.py",
+      "upstream_sha256": "945f4f241aa04525d5d108feea3e851abdf5dede2077ebac1f0663f06c0f032d"
+    },
+    "ga.py": {
+      "source": "amq/utils/ga.py",
+      "upstream_sha256": "4ec64cc80b1a2e52dd240342fb21c2db0fea6a8bf21200d0bfdc70ae8d5f538b"
+    },
+    "rbf.py": {
+      "source": "amq/predictor/rbf.py",
+      "upstream_sha256": "a6f5f2a65790d5b35bfb4830d3c6f5d3a45f9d9d6904ec54c581dcb770951a72"
+    },
+    "search.py": {
+      "source": "amq/search/optimizer.py",
+      "upstream_sha256": "9c9a0e98385109337577a6f5e9fcbe6cd729b8dc5938c2cbc57f29e00d920186",
+      "extracted_methods": [
+        "_fit_predictor",
+        "_next",
+        "_subset_selection"
+      ]
+    }
+  },
+  "changes": "Relative imports; extracted search methods, RBF-only factory, standalone bit-accounting helper. Search operators and methods preserved. RBF import routed through pysot_compat: private namespace loading skips unrelated pyDOE2 imports on Python >=3.12; surrogate calculations unchanged. Search minimize import uses temporary row_stack=vstack compatibility for NumPy versions that removed that alias."
+}

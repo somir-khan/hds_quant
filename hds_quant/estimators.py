@@ -40,7 +40,7 @@ COORD_HIST_BUCKETS = 16  # B_c_hist: canonical coordinate buckets of the explici
 def compute_selected_estimator(R_pb, fp16_col_norms, proj_family_idx, encoder,
                                estimator, coord_binding="salience_bucket"):
     """Compute ONLY one limited-label benchmark feature, matching compute_estimators."""
-    if estimator not in ("Scalar-MSE-Ridge", "Coord-Rank-Hist", "HDS-Hybrid"):
+    if estimator not in ("Scalar-MSE-Ridge", "Coord-Rank-Hist", "Coord-Rank-Exact", "HDS-Hybrid"):
         raise ValueError(f"Unsupported standalone estimator: {estimator}")
     R = R_pb.to(device=encoder.device, dtype=torch.float32)
     mse = float(R.pow(2).mean())
@@ -54,6 +54,8 @@ def compute_selected_estimator(R_pb, fp16_col_norms, proj_family_idx, encoder,
     meta = torch.cat([R.new_tensor([log_mse, math.log(q99 + _LOG_EPS)]), one_hot])
     if estimator == "HDS-Hybrid":
         vector = encoder.bind(F, fp16_col_norms, coord_binding)
+    elif estimator == "Coord-Rank-Exact":
+        vector = _coord_rank_exact(F, fp16_col_norms, encoder, coord_binding)
     else:
         vector = _coord_rank_hist(F, fp16_col_norms, encoder, coord_binding)
     return {estimator: torch.cat([vector, meta]).cpu()}

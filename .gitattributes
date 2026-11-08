@@ -1,0 +1,2 @@
+# SLURM and Bash require Unix line endings, including after a Windows checkout.
+*.sh text eol=lf

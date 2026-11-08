@@ -23,6 +23,7 @@ from .readout_cv import _build_alloc_costs, evaluate_fixed_k_layer_acquisition, 
 from .run_experiment import _build_smoke_model, _get_smoke_calib_ids, _pair_dict_to_json
 
 METHODS = ("HDS-Hybrid", "Coord-Rank-Hist", "Scalar-MSE-Ridge")
+SUPPORTED_METHODS = METHODS + ("Coord-Rank-Exact",)
 
 
 def sync(device):
@@ -150,7 +151,7 @@ def run_full_reference(model, calib_ids, eval_ids, cfg, budgets, seed, batch_siz
     return result, labels["delta_loss"]
 
 
-def run(args, data_preparer=None, model_check=None):
+def run(args, data_preparer=None, model_check=None, extra_trial_runner=None):
     if not args.smoke_test and not torch.cuda.is_available():
         raise RuntimeError("This benchmark requires CUDA; --smoke-test is available offline")
     if any(k < 2 for k in args.k_layers):
@@ -191,6 +192,8 @@ def run(args, data_preparer=None, model_check=None):
               "memory_scope": "CUDA allocated tensors during calibration, including resident model; increment is above trial-start allocation. CPU feature payload excludes object overhead. No inference memory/speed claim."}
     report["allocation_candidate_bits"] = list(allocation_bits)
     report["full_reference_enabled"] = not getattr(args, "skip_full_reference", False)
+    if hasattr(args, "comparison_protocol"):
+        report["comparison_protocol"] = args.comparison_protocol
     report["model_resolved_revision"] = getattr(model.config, "_commit_hash", None)
     if prepared is not None:
         report["data_manifest"] = prepared["manifest"]
@@ -245,13 +248,19 @@ def run(args, data_preparer=None, model_check=None):
                 report["trials"].append(trial)
                 save()
                 print(f"Done: calibration={trial['calibration_wall_sec']:.2f}s, labels={trial['probe_label_count']}", flush=True)
+        # Optional independent baseline, once per seed (not once per K). No labels/features are passed in.
+        if extra_trial_runner is not None:
+            trial = extra_trial_runner(model=model, calib_ids=calib, eval_ids=eval_ids, cfg=cfg,
+                budgets=args.budgets, seed=seed, batch_size=args.batch_size)
+            report["trials"].append(trial)
+            save()
         if getattr(args, "skip_full_reference", False):
             save()
             continue
         # Full labels are collected AFTER all limited-label decisions, and never supplied to them.
         ref, full_labels = run_full_reference(model, calib, eval_ids, cfg, args.budgets, seed, args.batch_size, allocation_bits=allocation_bits)
         report["references"].append(ref)
-        for trial in (t for t in report["trials"] if t["seed"] == seed):
+        for trial in (t for t in report["trials"] if t["seed"] == seed and "heldout_predictions" in t):
             heldout = {key: value for key, value in full_labels.items()
                        if int(key[0].split("layers.")[1].split(".")[0]) not in trial["acquired_layers"]}
             # Ranking is an offline diagnostic and does not enter allocation or calibration timings.
@@ -269,7 +278,7 @@ def parse_args():
     p.add_argument("--eval-dataset", choices=("wikitext2", "c4"), default="wikitext2")
     p.add_argument("--k-layers", type=int, nargs="+", default=[2, 4, 8])
     p.add_argument("--seeds", type=int, nargs="+", default=[42, 100, 2026])
-    p.add_argument("--methods", choices=METHODS, nargs="+", default=list(METHODS))
+    p.add_argument("--methods", choices=SUPPORTED_METHODS, nargs="+", default=list(METHODS))
     p.add_argument("--budgets", type=float, nargs="+", default=[3.0, 3.5])
     p.add_argument("--candidate-bits", type=int, choices=(1, 2, 3, 4), nargs="+", default=[1, 2, 3, 4])
     p.add_argument("--allocation-bits", type=int, choices=(1, 2, 3, 4), nargs="+", default=None)
