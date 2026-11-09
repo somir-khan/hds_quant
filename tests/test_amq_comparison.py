@@ -38,7 +38,8 @@ def test_configs(path):
         validate_spec(spec)
 
 
-def test_real_search_and_hqq_restore_model(tmp_path):
+@pytest.mark.parametrize('policy', ['window','cap_v2'])
+def test_real_search_and_hqq_restore_model(tmp_path, policy):
     torch.set_num_threads(1)
     model, ids = _build_smoke_model()
     before = {n: p.detach().clone() for n,p in model.named_parameters()}
@@ -47,7 +48,7 @@ def test_real_search_and_hqq_restore_model(tmp_path):
     calib = ids[:1,:16]
     result = run_amq_trial(model, calib, calib, cfg, [3.0,3.5], 42, 1,
         settings={'initial_samples':40,'iterations':1,'candidates_per_iteration':2,'population':20},
-        output=tmp_path)
+        output=tmp_path, budget_policy=policy)
     assert result['configuration_evaluations'] >= 40
     assert result['probe_label_count'] == 7*cfg.num_layers
     assert len(result['allocations'])+len(result['missing_budgets']) == 2
@@ -56,6 +57,20 @@ def test_real_search_and_hqq_restore_model(tmp_path):
     checkpoint = json.loads((tmp_path/'amq_seed_42/archive.json').read_text())
     assert checkpoint['complete']
     assert not (tmp_path/'amq_seed_42/teacher_logits.bin').exists()
+    if policy == 'cap_v2':
+        assert result['missing_budgets'] == []
+        assert len(result['initialization_anchors']) == 2
+        assert all(a['achieved_avg_bits'] <= float(b)+1e-10 for b,a in result['allocations'].items())
+    # Archive-only replay checks teacher/JSD and cache-vs-fresh calibration NLL.
+    selected = [dict(archive_index=2, reasons=['test_all4'], architecture=checkpoint['archive'][2][0],
+                     archived_jsd=checkpoint['archive'][2][1],payload_bits=4)]
+    replay = tmp_path/'replay'
+    replay.mkdir()
+    diagnostic = run_amq_trial(model,calib,calib,cfg,[3.0,3.5],42,1,
+                              settings={},output=replay,diagnostic=selected)
+    assert diagnostic['complete'] and diagnostic['candidates'][0]['parity_passed']
+    for n,p in model.named_parameters():
+        torch.testing.assert_close(p,before[n],rtol=0,atol=0)
 
 
 def test_scoring_failure_restores_original_weights(tmp_path, monkeypatch):

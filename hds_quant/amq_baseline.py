@@ -34,9 +34,13 @@ def jsd_tokens(p, q):
     return (0.5 * ((lp.exp() * (lp-m)).sum(-1) + (lq.exp() * (lq-m)).sum(-1))).sum()
 
 
-def run_amq_trial(model, calib_ids, eval_ids, cfg, budgets, seed, batch_size, *, settings, output):
-    from .amq_vendor.search import Search
-    from .amq_vendor.space import SearchSpace
+def run_amq_trial(model, calib_ids, eval_ids, cfg, budgets, seed, batch_size, *, settings, output,
+                  budget_policy='window', diagnostic=None):
+    if budget_policy not in ('window','cap_v2'):
+        raise ValueError('Unknown AMQ budget policy')
+    if diagnostic is None:
+        from .amq_vendor.search import Search
+        from .amq_vendor.space import SearchSpace
     np.random.seed(seed)
     torch.manual_seed(seed)
     device = next(model.parameters()).device
@@ -98,6 +102,36 @@ def run_amq_trial(model, calib_ids, eval_ids, cfg, budgets, seed, batch_size, *,
                 raise RuntimeError('Nonfinite AMQ JSD; refusing to hide a failed candidate')
             return value
 
+        if diagnostic is not None:
+            rows = []
+            for candidate in diagnostic:
+                print(f"Diagnosing AMQ archive index={candidate['archive_index']} payload={candidate['payload_bits']:.6f}", flush=True)
+                bits = assignment(candidate['architecture'])
+                value = score(candidate['architecture'])
+                # Score the currently installed cached weights, then restore FP weights.
+                cached_cal = evaluate_perplexity(model, calib_ids, meta, cfg,
+                    batch_size=batch_size, orig_weights_cpu=originals)
+                current.clear()
+                fresh_cal = evaluate_perplexity(model, calib_ids, meta, cfg,
+                    bit_assignment=bits, batch_size=batch_size, orig_weights_cpu=originals)
+                nll_difference = abs(cached_cal['nll']-fresh_cal['nll'])
+                jsd_difference = abs(value-candidate['archived_jsd'])
+                row = dict(candidate, recomputed_jsd=value, jsd_abs_difference=jsd_difference,
+                    cached_calibration=cached_cal, fresh_calibration=fresh_cal,
+                    cache_fresh_nll_abs_difference=nll_difference,
+                    parity_passed=nll_difference <= 1e-6 and jsd_difference <= 1e-5)
+                if not row['parity_passed']:
+                    rows.append(row)
+                    (directory/'diagnostic_partial.json').write_text(json.dumps(rows,indent=2))
+                    raise RuntimeError('AMQ archive/cache parity failed; inspect diagnostic_partial.json')
+                row['evaluation'] = evaluate_perplexity(model, eval_ids, meta, cfg,
+                    bit_assignment=bits, batch_size=batch_size, orig_weights_cpu=originals)
+                rows.append(row)
+                (directory/'diagnostic_partial.json').write_text(json.dumps(rows,indent=2))
+            return {'complete':True, 'seed':seed, 'candidates':rows,
+                    'diagnostic_wall_sec':time.perf_counter()-start,
+                    'scope':'Archive reevaluation only; not a new search or calibration-speed benchmark'}
+
         all4 = {'linear': {f: [4]*cfg.num_layers for f in PROJ_FAMILIES}}
         sensitivity = {}
         screen_start = time.perf_counter()
@@ -122,7 +156,7 @@ def run_amq_trial(model, calib_ids, eval_ids, cfg, budgets, seed, batch_size, *,
             sync(device)
             data = {'iteration': iteration, 'archive': archive, 'sensitivity': sensitivity,
                     'fixed_4bit': fixed, 'elapsed_sec': time.perf_counter()-start,
-                    'settings': settings, 'seed': seed, 'complete': False}
+                    'settings': settings, 'seed': seed, 'budget_policy':budget_policy, 'complete': False}
             temp = directory/'archive.tmp'
             temp.write_text(json.dumps(data, allow_nan=False), encoding='utf-8')
             temp.replace(directory/'archive.json')
@@ -138,6 +172,11 @@ def run_amq_trial(model, calib_ids, eval_ids, cfg, budgets, seed, batch_size, *,
 
         checkpoint(-1)
         evaluate(engine.search_space.initialize(settings['initial_samples']))
+        anchors = []
+        if budget_policy == 'cap_v2':
+            from .amq_coverage import exact_anchor
+            anchors = [exact_anchor(config, fixed, b, seed) for b in budgets]
+            evaluate(anchors)
         if len(archive) < active+1:
             raise RuntimeError('Too few distinct initial candidates for the RBF linear tail')
         checkpoint(0)
@@ -153,7 +192,11 @@ def run_amq_trial(model, calib_ids, eval_ids, cfg, budgets, seed, batch_size, *,
         elapsed = time.perf_counter()-start
         allocations, missing = {}, []
         for budget in budgets:
-            candidate = select_candidate(archive, budget, cfg.quant_group_size)
+            if budget_policy == 'cap_v2':
+                from .amq_coverage import select_under_cap
+                candidate = select_under_cap(archive, budget, cfg.quant_group_size)
+            else:
+                candidate = select_candidate(archive, budget, cfg.quant_group_size)
             if candidate is None:
                 missing.append(budget)
                 continue
@@ -163,7 +206,9 @@ def run_amq_trial(model, calib_ids, eval_ids, cfg, budgets, seed, batch_size, *,
                 'achieved_avg_bits': achieved, 'bit_counts': dict(Counter(bits.values())),
                 'calibration_jsd': candidate[1], 'allocation_sec': 0.0,
                 'calibration_to_budget_sec': elapsed}
-        result = {'seed': seed, 'method': METHOD, 'k_layers': 0, 'acquired_layers': [],
+        result = {'seed': seed, 'method': METHOD if budget_policy == 'window' else 'AMQ-HQQ-BudgetCap-v2',
+            'budget_policy':budget_policy, 'initialization_anchors':anchors,
+            'k_layers': 0, 'acquired_layers': [],
             'trial_kind': 'external_search', 'probe_label_count': len(sensitivity),
             'configuration_evaluations': len(archive), 'fixed_4bit': fixed,
             'proxy_and_teacher_sec': proxy_sec, 'screening_sec': screen_sec,

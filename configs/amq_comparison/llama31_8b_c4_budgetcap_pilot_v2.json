@@ -1,0 +1,54 @@
+{
+  "schema": "amq_comparison_v2",
+  "experiment_id": "llama31_8b_c4_amq_budgetcap_pilot_v2",
+  "purpose": "benchmark",
+  "model_id": "meta-llama/Llama-3.1-8B-Instruct",
+  "model_revision": "0e9e39f249a16976918f6564b8830bc894c89659",
+  "dataset": {
+    "name": "c4",
+    "revision": "1588ec454efa1a09f29cd18ddd04fe05fc8653a2",
+    "calibration_docs": 20000,
+    "evaluation_docs": 1100,
+    "eval_chunks": 141
+  },
+  "seeds": [
+    42
+  ],
+  "k_layers": [
+    4
+  ],
+  "methods": [
+    "HDS-Hybrid",
+    "Coord-Rank-Hist",
+    "Coord-Rank-Exact"
+  ],
+  "probe_bits": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "allocation_bits": [
+    2,
+    3,
+    4
+  ],
+  "budgets": [
+    3.0,
+    3.5
+  ],
+  "calibration": {
+    "n_sequences": 64,
+    "seq_len": 1024,
+    "max_encoded_tokens": 4096
+  },
+  "eval_seq_len": 2048,
+  "batch_size": 1,
+  "full_reference": false,
+  "amq_search": {
+    "initial_samples": 250,
+    "iterations": 2,
+    "candidates_per_iteration": 10,
+    "population": 200
+  }
+}

@@ -1,5 +1,9 @@
 # AMQ comparison
 
+For the follow-up to pilot job1169695, use [AMQ_NEXT_RUNS.md](AMQ_NEXT_RUNS.md).
+It documents the archive diagnostic and separately versioned budget-cap v2 pilot.
+The commands below describe the original v1 protocol.
+
 This experiment adds **AMQ-HQQ-Matched** alongside HDS-Hybrid, Coord-Rank-Hist,
 and Coord-Rank-Exact at K=4. It does not modify or merge the pending
 representation-controls/LIM jobs. CoopQ is excluded.

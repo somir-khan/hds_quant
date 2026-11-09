@@ -2,6 +2,8 @@
 !requirements.txt
 !requirements-amq.txt
 results_hqq_amq_comparison/
+results_hqq_amq_diagnostic/
+results_hqq_amq_budgetcap_v2/
 venv/
 research_concept_proposal.pdf
 SPEC.md

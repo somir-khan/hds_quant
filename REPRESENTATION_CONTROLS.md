@@ -1,5 +1,9 @@
 # Coord-Rank-Exact and LIM comparison
 
+The dedicated C4 launcher is `scripts/run_representation_controls_c4_a100.sh`;
+it selects the same C4 configuration shown below. See [AMQ_NEXT_RUNS.md](AMQ_NEXT_RUNS.md)
+for the current submission sequence alongside the separate AMQ diagnostic.
+
 This is a separate, bounded follow-up to the completed 8B WikiText-2 and C4
 experiments. Existing configs, historical results, and default method lists are
 unchanged. New configs live in `configs/representation_controls/`; the new runner
