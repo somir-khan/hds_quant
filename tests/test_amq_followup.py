@@ -137,3 +137,32 @@ def test_real_small_model_objective_scoring_and_replay_failure(tmp_path):
         assert result['candidates'][0]['parity_passed']
         assert not (out/'amq_seed_42/teacher_logits.bin').exists()
         for n,p in model.named_parameters(): torch.testing.assert_close(p,before[n],rtol=0,atol=0)
+
+
+def test_uniform_plan_freezes_all_observed_gates_and_checks_reference(source, tmp_path):
+    from hds_quant.run_uniform_swap import build_plan as swap_plan, uniform_swap
+    root=Path(__file__).resolve().parents[1]
+    spec=json.loads((root/'configs/amq_diagnostics/llama31_8b_wikitext_uniform_swap_v1.json').read_text())
+    _,raw,_,hashes,_=load_source(source,42)
+    reference=tmp_path/'fixed4';reference.mkdir()
+    rows=[];pairs=[];meta=geometry()
+    for i,method in enumerate(METHODS):
+        original=next(t for t in raw['trials'] if t['method']==method)['allocations']['3.00']
+        before=dict(candidate_id=f'b{i}',architecture=architecture(original['bit_assignment']),
+                    evaluation=original['evaluation'],parity_passed=True)
+        bits=uniform_swap(meta,'model.layers.31.mlp.down_proj',f"model.layers.{spec['gate_layers'][method]}.mlp.gate_proj")
+        after=dict(candidate_id=f'a{i}',architecture=architecture(bits),evaluation=original['evaluation'],parity_passed=True)
+        rows.extend([before,after]);pairs.append(dict(method=method,budget=3.0,before_id=f'b{i}',after_id=f'a{i}'))
+    for name,value in [
+        ('diagnostic_manifest.json',dict(complete=True,mode='fixed4',source_hashes=hashes)),
+        ('diagnostic.json',dict(complete=True,mode='fixed4',candidates=rows)),
+        ('selection_plan.json',dict(seed=42,source_hashes=hashes,candidates=rows,comparisons=pairs))]:
+        (reference/name).write_text(json.dumps(value))
+    before=copy.deepcopy(raw)
+    plan,actual=swap_plan(spec,source,reference)
+    assert len(plan['candidates'])==3 and actual==before
+    assert {r['gate_projection'] for r in plan['candidates']}=={f'model.layers.{i}.mlp.gate_proj' for i in [28,14,1]}
+    assert all(r['actual_payload_bits']==3 for r in plan['candidates'])
+    spec['gate_layers']['HDS-Hybrid']=0
+    with pytest.raises(ValueError,match='all three'):
+        swap_plan(spec,source,reference)

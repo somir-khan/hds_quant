@@ -1,5 +1,10 @@
 # C4 controls, AMQ archive diagnostic, and budget coverage v2
 
+The objective/fixed4 diagnostics have completed. The next small control is the
+frozen Uniform-3 matched swap in [UNIFORM_SWAP_CONTROL.md](UNIFORM_SWAP_CONTROL.md),
+before a seed100 replication. Boundary-inclusive labeling remains a later,
+separate method change.
+
 The 20-round WikiText run has completed as job 1173223. The current follow-up is
 the saved-assignment objective diagnostic and fixed4 constraint check described
 in [AMQ_OBJECTIVE_FIXED4_DIAGNOSTICS.md](AMQ_OBJECTIVE_FIXED4_DIAGNOSTICS.md).

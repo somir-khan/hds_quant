@@ -1,0 +1,7 @@
+{
+  "schema": "uniform_swap_control_v1",
+  "seed": 42,
+  "source_dir": "results_hqq_amq_budgetcap_20round_v2/job_1173223_llama31_8b_wikitext_amq_budgetcap_20round_v2",
+  "fixed4_source_dir": "results_hqq_amq_fixed4_diagnostic/job_1174274_llama31_8b_wikitext_fixed4_v1",
+  "gate_layers": {"HDS-Hybrid": 28, "Coord-Rank-Hist": 14, "Coord-Rank-Exact": 1}
+}
