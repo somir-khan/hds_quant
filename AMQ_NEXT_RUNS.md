@@ -1,5 +1,9 @@
 # C4 controls, AMQ archive diagnostic, and budget coverage v2
 
+The 20-round WikiText run has completed as job 1173223. The current follow-up is
+the saved-assignment objective diagnostic and fixed4 constraint check described
+in [AMQ_OBJECTIVE_FIXED4_DIAGNOSTICS.md](AMQ_OBJECTIVE_FIXED4_DIAGNOSTICS.md).
+
 The diagnostic and two-round WikiText v2 pilot have now completed. For the next
 bounded 20-round WikiText run, use [AMQ_20_ROUND.md](AMQ_20_ROUND.md) and the dedicated
 `scripts/run_amq_budgetcap_20round_a100.sh` launcher. The instructions below retain

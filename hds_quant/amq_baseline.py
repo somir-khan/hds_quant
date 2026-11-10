@@ -106,7 +106,8 @@ def run_amq_trial(model, calib_ids, eval_ids, cfg, budgets, seed, batch_size, *,
         if diagnostic is not None:
             rows = []
             for candidate in diagnostic:
-                print(f"Diagnosing AMQ archive index={candidate['archive_index']} payload={candidate['payload_bits']:.6f}", flush=True)
+                label = candidate.get('candidate_id', candidate.get('archive_index'))
+                print(f"Diagnosing assignment={label} payload={candidate['payload_bits']:.6f}", flush=True)
                 bits = assignment(candidate['architecture'])
                 value = score(candidate['architecture'])
                 # Score the currently installed cached weights, then restore FP weights.
@@ -116,11 +117,12 @@ def run_amq_trial(model, calib_ids, eval_ids, cfg, budgets, seed, batch_size, *,
                 fresh_cal = evaluate_perplexity(model, calib_ids, meta, cfg,
                     bit_assignment=bits, batch_size=batch_size, orig_weights_cpu=originals)
                 nll_difference = abs(cached_cal['nll']-fresh_cal['nll'])
-                jsd_difference = abs(value-candidate['archived_jsd'])
+                expected_jsd = candidate.get('archived_jsd')
+                jsd_difference = abs(value-expected_jsd) if expected_jsd is not None else None
                 row = dict(candidate, recomputed_jsd=value, jsd_abs_difference=jsd_difference,
                     cached_calibration=cached_cal, fresh_calibration=fresh_cal,
                     cache_fresh_nll_abs_difference=nll_difference,
-                    parity_passed=nll_difference <= 1e-6 and jsd_difference <= 1e-5)
+                    parity_passed=nll_difference <= 1e-6 and (jsd_difference is None or jsd_difference <= 1e-5))
                 if not row['parity_passed']:
                     rows.append(row)
                     (directory/'diagnostic_partial.json').write_text(json.dumps(rows,indent=2))

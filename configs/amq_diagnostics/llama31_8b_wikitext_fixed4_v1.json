@@ -1,0 +1,16 @@
+{
+  "schema": "amq_followup_v1",
+  "experiment_id": "llama31_8b_wikitext_fixed4_v1",
+  "mode": "fixed4",
+  "source_dir": "results_hqq_amq_budgetcap_20round_v2/job_1173223_llama31_8b_wikitext_amq_budgetcap_20round_v2",
+  "seed": 42,
+  "budgets": [
+    3.0,
+    3.5
+  ],
+  "methods": [
+    "HDS-Hybrid",
+    "Coord-Rank-Hist",
+    "Coord-Rank-Exact"
+  ]
+}
