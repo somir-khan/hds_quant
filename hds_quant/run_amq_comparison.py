@@ -55,7 +55,8 @@ def run_config(config_path, output_dir, smoke_test=False):
                'scripts/launch_amq_comparison.sh', 'scripts/run_amq_comparison_a100.sh',
                'scripts/load_hf_env.sh']
     if policy == 'cap_v2':
-        sources.append('scripts/run_amq_budgetcap_a100.sh')
+        sources += ['scripts/run_amq_budgetcap_a100.sh', 'hds_quant/amq_progress.py',
+                    'scripts/run_amq_budgetcap_20round_a100.sh']
     sources += [str(p.relative_to(Path(__file__).resolve().parents[1])).replace('\\', '/')
                 for p in Path(__file__).with_name('amq_vendor').iterdir() if p.is_file()]
     return shared_run(config_path, output_dir, smoke_test, spec_validator=validate_spec,

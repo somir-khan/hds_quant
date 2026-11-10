@@ -52,6 +52,7 @@ def run_amq_trial(model, calib_ids, eval_ids, cfg, budgets, seed, batch_size, *,
     start = time.perf_counter()
     originals, proxies, current = {}, {}, {}
     archive = []
+    search_history = []
     mapping = {(m['layer_idx'], '.'.join(m['name'].split('.')[-2:])): m for m in meta}
     config = {'n_block': cfg.num_layers, 'n_linear': 7, 'linear': list(PROJ_FAMILIES),
               'linear_shape': {f: [mapping[0, f]['d_out'], mapping[0, f]['d_in']] for f in PROJ_FAMILIES},
@@ -157,9 +158,26 @@ def run_amq_trial(model, calib_ids, eval_ids, cfg, budgets, seed, batch_size, *,
             data = {'iteration': iteration, 'archive': archive, 'sensitivity': sensitivity,
                     'fixed_4bit': fixed, 'elapsed_sec': time.perf_counter()-start,
                     'settings': settings, 'seed': seed, 'budget_policy':budget_policy, 'complete': False}
+            if budget_policy == 'cap_v2':
+                data['search_history'] = search_history
             temp = directory/'archive.tmp'
             temp.write_text(json.dumps(data, allow_nan=False), encoding='utf-8')
             temp.replace(directory/'archive.json')
+
+        def record_progress(stage, iteration, new_from):
+            if budget_policy != 'cap_v2':
+                return
+            from .amq_progress import progress_snapshot, write_progress
+            sync(device)
+            snapshot = progress_snapshot(archive, budgets, cfg.quant_group_size, search_history,
+                stage=stage, iteration=iteration, new_from=new_from,
+                elapsed_sec=time.perf_counter()-start)
+            search_history.append(snapshot)
+            write_progress(directory, search_history)
+            for budget, row in snapshot['budgets'].items():
+                print(f"AMQ progress stage={stage} round={iteration} cap={budget} "
+                      f"best_jsd={row['best_calibration_jsd']} bits={row['actual_payload_bits']} "
+                      f"winner={row['best_archive_index']} origin={row['winner_origin']}", flush=True)
 
         def evaluate(candidates):
             from .amq_vendor.helpers import get_bits_usage
@@ -172,20 +190,25 @@ def run_amq_trial(model, calib_ids, eval_ids, cfg, budgets, seed, batch_size, *,
 
         checkpoint(-1)
         evaluate(engine.search_space.initialize(settings['initial_samples']))
+        record_progress('initial_design', 0, 0)
         anchors = []
         if budget_policy == 'cap_v2':
             from .amq_coverage import exact_anchor
+            anchor_start = len(archive)
             anchors = [exact_anchor(config, fixed, b, seed) for b in budgets]
             evaluate(anchors)
+            record_progress('budget_anchors', 0, anchor_start)
         if len(archive) < active+1:
             raise RuntimeError('Too few distinct initial candidates for the RBF linear tail')
         checkpoint(0)
         for iteration in range(1, settings['iterations']+1):
+            round_start = len(archive)
             predictor, _ = engine._fit_predictor(archive)
             candidates, _ = engine._next(archive, predictor, settings['candidates_per_iteration'])
             if not candidates:
                 raise RuntimeError('AMQ produced no new candidates; inspect checkpoint')
             evaluate(candidates)
+            record_progress('refinement', iteration, round_start)
             checkpoint(iteration)
             print(f'AMQ seed={seed} iteration={iteration}: {len(archive)} evaluated configurations', flush=True)
         sync(device)
@@ -219,6 +242,8 @@ def run_amq_trial(model, calib_ids, eval_ids, cfg, budgets, seed, batch_size, *,
             'allocations': allocations, 'missing_budgets': missing,
             'timing_scope': 'Includes host proxy construction, teacher logits, screening, search and archive I/O; excludes held-out evaluation and model/data load.',
             **memory_finish(device, baseline)}
+        if budget_policy == 'cap_v2':
+            result['search_history'] = search_history
     finally:
         with torch.no_grad():
             for m in meta:

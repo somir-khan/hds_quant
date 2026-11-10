@@ -61,6 +61,12 @@ def test_real_search_and_hqq_restore_model(tmp_path, policy):
         assert result['missing_budgets'] == []
         assert len(result['initialization_anchors']) == 2
         assert all(a['achieved_avg_bits'] <= float(b)+1e-10 for b,a in result['allocations'].items())
+        progress = json.loads((tmp_path/'amq_seed_42/search_progress.json').read_text())['history']
+        assert [p['stage'] for p in progress] == ['initial_design', 'budget_anchors', 'refinement']
+        assert progress == checkpoint['search_history'] == result['search_history']
+        assert progress[-1]['configuration_evaluations'] == result['configuration_evaluations']
+        for budget, allocation in result['allocations'].items():
+            assert progress[-1]['budgets'][budget]['best_calibration_jsd'] == allocation['calibration_jsd']
     # Archive-only replay checks teacher/JSD and cache-vs-fresh calibration NLL.
     selected = [dict(archive_index=2, reasons=['test_all4'], architecture=checkpoint['archive'][2][0],
                      archived_jsd=checkpoint['archive'][2][1],payload_bits=4)]

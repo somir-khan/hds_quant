@@ -1,5 +1,10 @@
 # C4 controls, AMQ archive diagnostic, and budget coverage v2
 
+The diagnostic and two-round WikiText v2 pilot have now completed. For the next
+bounded 20-round WikiText run, use [AMQ_20_ROUND.md](AMQ_20_ROUND.md) and the dedicated
+`scripts/run_amq_budgetcap_20round_a100.sh` launcher. The instructions below retain
+the earlier diagnostic/pilot sequence for reproducibility.
+
 Run these as separate jobs with separate result directories. Existing completed
 WikiText results and all v1 configurations remain unchanged. All launchers source
 the project `.env` through `scripts/load_hf_env.sh` and use `HQQ_PYTHON` or
