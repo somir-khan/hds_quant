@@ -1,0 +1,11 @@
+{
+  "schema": "allocation_controls_v1",
+  "experiment_id": "llama31_8b_wikitext_allocation_controls_seed42_v1",
+  "source_dir": "results_hqq_amq_budgetcap_20round_v2/job_1173223_llama31_8b_wikitext_amq_budgetcap_20round_v2",
+  "seed": 42,
+  "budgets": [2.5, 3.0, 3.5],
+  "settings": ["unconstrained", "last_down4"],
+  "family_tie_orders": ["depth_ascending", "random_17", "random_29"],
+  "metadata_methods": ["Scalar-Meta-Ridge", "Scalar-Meta-Depth-Ridge"],
+  "simple_patterns": ["last_half", "alternating_odd"]
+}

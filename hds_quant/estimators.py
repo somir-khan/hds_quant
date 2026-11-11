@@ -40,7 +40,7 @@ COORD_HIST_BUCKETS = 16  # B_c_hist: canonical coordinate buckets of the explici
 def compute_selected_estimator(R_pb, fp16_col_norms, proj_family_idx, encoder,
                                estimator, coord_binding="salience_bucket"):
     """Compute ONLY one limited-label benchmark feature, matching compute_estimators."""
-    if estimator not in ("Scalar-MSE-Ridge", "Coord-Rank-Hist", "Coord-Rank-Exact", "HDS-Hybrid"):
+    if estimator not in ("Scalar-MSE-Ridge", "Scalar-Meta-Ridge", "Coord-Rank-Hist", "Coord-Rank-Exact", "HDS-Hybrid"):
         raise ValueError(f"Unsupported standalone estimator: {estimator}")
     R = R_pb.to(device=encoder.device, dtype=torch.float32)
     mse = float(R.pow(2).mean())
@@ -48,10 +48,12 @@ def compute_selected_estimator(R_pb, fp16_col_norms, proj_family_idx, encoder,
         return {"Scalar-MSE": mse}
     log_mse = math.log(mse + _LOG_EPS)
     q99 = _sorted_quantile(torch.sort(R.reshape(-1)).values, 0.99)
-    F = encoder.level_frequencies(R)
     one_hot = torch.zeros(len(PROJ_FAMILIES), dtype=torch.float32, device=R.device)
     one_hot[proj_family_idx] = 1.0
     meta = torch.cat([R.new_tensor([log_mse, math.log(q99 + _LOG_EPS)]), one_hot])
+    if estimator == "Scalar-Meta-Ridge":
+        return {estimator: meta.cpu()}
+    F = encoder.level_frequencies(R)
     if estimator == "HDS-Hybrid":
         vector = encoder.bind(F, fp16_col_norms, coord_binding)
     elif estimator == "Coord-Rank-Exact":
