@@ -1,0 +1,47 @@
+{
+  "schema": "coverage_study_v1",
+  "experiment_id": "llama31_8b_c4_coverage_v1",
+  "dataset": "c4",
+  "source_dir": "results_hqq_representation_controls/job_1171547_llama31_8b_c4_coordexact_lim_k4_v1",
+  "seeds": [
+    42,
+    100,
+    2026
+  ],
+  "k_layers": [
+    2,
+    4,
+    8
+  ],
+  "acquisition_policies": [
+    "stratified",
+    "boundary_inclusive"
+  ],
+  "acquisition_rule": "replace_extreme_strata_with_endpoints",
+  "methods": [
+    "Family-Mean",
+    "Family-Median",
+    "Scalar-Meta-Ridge",
+    "Coord-Rank-Hist",
+    "HDS-Hybrid"
+  ],
+  "budgets": [
+    3,
+    3.5
+  ],
+  "family_tie_orders": [
+    "depth_ascending",
+    "random_17",
+    "random_29",
+    "random_43",
+    "random_59",
+    "random_71",
+    "random_89",
+    "random_101",
+    "random_127",
+    "random_149",
+    "random_173"
+  ],
+  "protection": "last_down4",
+  "materiality_percent": 1
+}
