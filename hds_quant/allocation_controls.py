@@ -67,14 +67,14 @@ def solve_control(costs, meta, budget, protection=False):
     return bits
 
 
-def family_tie_order(bits, costs, meta, measured_names, order, protected=()):
+def family_tie_order(bits, costs, meta, measured_names, order, protected=(), *, allowed_orders=None):
     """Permute equal-cost, equal-size unlabeled projections within each family.
 
     Keeps the ILP's per-family precision counts and primary objective exactly.
     This tests block-placement ties, not alternative optimal family-count solutions.
     SHA256 seeded orders avoid dependence on Python hash randomization or RNG state.
     """
-    if order not in TIE_ORDERS:
+    if order not in (TIE_ORDERS if allowed_orders is None else allowed_orders):
         raise ValueError('Unknown tie ordering')
     groups = defaultdict(list)
     for m in meta:

@@ -1,0 +1,17 @@
+{
+  "schema": "frozen_replication_v1",
+  "experiment_id": "llama31_8b_c4_frozen_replication_v1",
+  "dataset": "c4",
+  "source_dir": "results_hqq_representation_controls/job_1171547_llama31_8b_c4_coordexact_lim_k4_v1",
+  "seeds": [42, 100, 2026],
+  "k_layers": 4,
+  "budgets": [2.5, 3.0, 3.5],
+  "settings": ["unconstrained", "last_down4"],
+  "saved_methods": ["HDS-Hybrid", "Coord-Rank-Hist", "Coord-Rank-Exact"],
+  "metadata_methods": ["Scalar-Meta-Ridge", "Scalar-Meta-Depth-Ridge"],
+  "family_tie_orders": ["depth_ascending", "random_17", "random_29", "random_43", "random_59", "random_71", "random_89", "random_101", "random_127", "random_149", "random_173"],
+  "primary_family_order": "depth_ascending",
+  "protection_rule": "preserve_feasible_unconstrained_assignment",
+  "simple_patterns": ["last_half", "alternating_odd"],
+  "materiality_percent": 1.0
+}

@@ -53,7 +53,7 @@ def write_summaries(report, output):
     (output/'SUMMARY.txt').write_text('\n'.join(lines)+'\n', encoding='utf-8')
 
 
-def evaluate_candidates(model, ids, cfg, plan, raw, output):
+def evaluate_candidates(model, ids, cfg, plan, raw, output, *, summary_writer=None, result_fields=None):
     from .evaluator import evaluate_perplexity
     from .label_collector import discover_target_projections
     from .run_no1bit_diagnostic import check_evaluation
@@ -62,6 +62,9 @@ def evaluate_candidates(model, ids, cfg, plan, raw, output):
         seed=plan['seed'], acquired_layers=plan['acquired_layers'],
         probe_label_count=plan['probe_label_count'], reuses_labels=True,
         timing_scope=plan['timing_scope'], baseline_checks={}, candidates=[])
+    if result_fields:
+        report.update(result_fields)
+    write_summary = summary_writer or write_summaries
     save(output/'diagnostic.json', report)
     for name, bit in [('FP16', None), ('Uniform-3bit', 3), ('Uniform-4bit', 4)]:
         ev = evaluate_perplexity(model, ids, meta, cfg, uniform_bit=bit, batch_size=1)
@@ -76,9 +79,9 @@ def evaluate_candidates(model, ids, cfg, plan, raw, output):
         checks = [check_evaluation(ev, old, 1e-6) for old in candidate['historical_evaluations']]
         report['candidates'].append(dict(candidate, evaluation=ev, historical_replay_checks=checks))
         save(output/'diagnostic.json', report)
-        write_summaries(report, output)
+        write_summary(report, output)
     report['complete'] = True
-    save(output/'diagnostic.json', report); write_summaries(report, output)
+    save(output/'diagnostic.json', report); write_summary(report, output)
     return report
 
 
