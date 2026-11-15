@@ -13,6 +13,7 @@ results_hqq_frozen_replication_wikitext/
 results_hqq_frozen_replication_c4/
 results_hqq_frozen_replication_summary/
 results_hqq_coverage_*/
+results_hqq_1b_focused/
 venv/
 research_concept_proposal.pdf
 SPEC.md

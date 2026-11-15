@@ -44,9 +44,9 @@ def label_replay(labels, expected):
     return dict(overlapping_label_count=len(common), max_abs_difference=gap, passed=True)
 
 
-def build_quality_plan(model, calib, cfg, spec, seed, output, source_labels):
+def build_quality_plan(model, calib, cfg, spec, seed, output, source_labels, *, acquisition_override=None):
     meta = discover_target_projections(model); device = next(model.parameters()).device
-    acquisitions = acquisition_plan(spec, seed, cfg.num_layers)
+    acquisitions = acquisition_override or acquisition_plan(spec, seed, cfg.num_layers)
     union = acquisitions['union_layers']
     labels = collect_marginal_loss_labels(model, calib, cfg, batch_size=1, target_layers=set(union))
     check_labels(labels['delta_loss'], meta, union, cfg)
