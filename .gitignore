@@ -14,6 +14,9 @@ results_hqq_frozen_replication_c4/
 results_hqq_frozen_replication_summary/
 results_hqq_coverage_*/
 results_hqq_1b_focused/
+results_hqq_arr_controls/
+results_hqq_arr_e_diagnostic/
+results_hqq_arr_summary/
 venv/
 research_concept_proposal.pdf
 SPEC.md

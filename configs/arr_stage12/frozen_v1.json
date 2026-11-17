@@ -1,0 +1,25 @@
+{
+  "schema": "arr_stage12_v1",
+  "budgets": [3.0, 3.5],
+  "primary_budget": 3.5,
+  "probe_bits": [2, 3],
+  "final_bits": [2, 3, 4],
+  "protection": "last_down4",
+  "cells": [{"k_layers": 2, "policy": "boundary_inclusive"}, {"k_layers": 8, "policy": "stratified"}],
+  "predictors": ["Scalar-Meta-Ridge", "Coord-Rank-Hist", "HDS-Hybrid"],
+  "parity_tolerance": 1e-8,
+  "replay_tolerance": 1e-6,
+  "preserve_legacy_indicator_geometry": true,
+  "depth_features": ["depth", "depth_squared", "is_first", "is_last"],
+  "direct_residual": "exp_saved_log_mse_minus_1e-8",
+  "e_case_index": 6,
+  "e_joint_block": 0,
+  "e_joint_bits": 2,
+  "e_joint_context": "all_other_projections_4bit",
+  "e_source_replay_blocks": [0, 15],
+  "source_roots": {
+    "8b_wikitext": "results_hqq_coverage_wikitext_quality",
+    "8b_c4": "results_hqq_coverage_c4_quality",
+    "1b": "results_hqq_1b_focused/job_1182854_both_v1"
+  }
+}
